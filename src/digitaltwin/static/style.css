@@ -1511,3 +1511,138 @@ body, html {
   color: #fff;
   background: rgba(6, 182, 212, 0.15);
 }
+
+/* Operator-first layout refresh */
+.hud-overlay { padding: 18px; }
+.top-bar { min-height: 72px; padding: 12px 16px; }
+.main-title { font-size: 17px; letter-spacing: .035em; }
+.sub-title { margin-top: 3px; font-size: 11px; color: var(--text-muted); }
+.badge, .mode-toggle-btn, .btn-reconnect-mini, .btn-drawer-toggle { min-height: 40px; font-size: 12px; }
+.btn-header-stop {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid #f87171;
+  border-radius: 9px;
+  background: #b91c1c;
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.btn-header-stop span { display: block; font-family: var(--font-mono); font-size: 9px; opacity: .8; }
+.middle-row { justify-content: flex-end; margin: 14px 0; }
+.operator-rail { width: 360px; gap: 12px; }
+.operator-rail .card { padding: 16px; }
+.operator-rail .card:nth-child(2) { order: -1; }
+.operator-rail .card-title { font-size: 13px; color: #cbd5e1; }
+.operator-rail .card-tag { font-size: 11px; padding: 4px 8px; }
+.operator-rail .status-ticker { min-height: 58px; padding: 12px; font-family: var(--font-sans); font-size: 15px; line-height: 1.45; }
+.operator-rail .motion-phase-tag { font-size: 12px; padding: 5px 8px; }
+.operator-rail .motion-phase-desc { font-family: var(--font-sans); font-size: 13px; line-height: 1.4; }
+.operator-rail .motion-angle-tag { font-size: 11px; }
+.operator-rail .floor-header, .operator-rail .slot-cell { font-size: 11px; }
+.operator-rail .slot-cell { min-height: 42px; justify-content: center; }
+.multi-center-panel { max-height: min(440px, 48vh); }
+.multi-center-panel.collapsed { max-height: 58px; }
+.drawer-tabs-header { min-height: 56px; padding: 8px 14px; }
+.drawer-tab { min-height: 40px; font-family: var(--font-sans); font-size: 13px; letter-spacing: .01em; }
+.diagnostics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.diagnostics-grid .card { padding: 16px; }
+.diagnostics-grid .card-title { font-size: 13px; }
+.diagnostics-grid .joint-row, .diagnostics-grid .pose-box-val { font-size: 13px; }
+.diagnostics-grid .pose-box-label, .diagnostics-grid .io-name, .diagnostics-grid .io-pill { font-size: 11px; }
+
+/* Refined operating rail */
+.operator-rail .card:nth-child(3) { order: -1; }
+.operator-rail .motion-phase-box { padding: 7px 9px; }
+.operator-rail .motion-angle-tag { display: none; }
+.operator-rail .pallet-grid-hud { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+.operator-rail .floor-group { padding: 6px; }
+.operator-rail .slot-cell span:last-child { display: none; }
+.operator-rail .slot-cell { min-height: 32px; }
+.operator-rail .card:first-child { padding-top: 13px; padding-bottom: 12px; }
+.tool-summary-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 78px;
+}
+.tool-summary-copy { min-width: 0; }
+.tool-summary-label { color: var(--text-muted); font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+.tool-summary-name { margin-top: 3px; color: #fff; font-size: 14px; font-weight: 700; }
+.tool-summary-state { margin-top: 3px; font-family: var(--font-mono); font-size: 12px; color: var(--accent-cyan); }
+.tool-summary-actions { display: flex; flex-direction: column; gap: 5px; }
+.tool-summary-actions .btn-toggle-sensor { min-height: 30px; min-width: 106px; font-size: 10px; }
+.btn-header-stop.is-active { background: #f8fafc; border-color: #fff; color: #991b1b; }
+
+/* Larger, calmer control surfaces */
+.drawer-body { padding: 18px; }
+.programs-grid { gap: 16px; }
+.program-card { min-height: 188px; padding: 16px; }
+.program-title { font-size: 15px; }
+.program-subtitle { margin-top: 3px; font-size: 11px; }
+.program-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.program-card:nth-child(4) .program-desc { display: none; }
+.program-card:nth-child(4) .btn-action-sm { min-width: 0; font-size: 10px; }
+.btn-prog-run, .btn-stop-action { min-height: 44px; font-family: var(--font-sans); font-size: 13px; }
+.btn-action-sm { min-height: 38px; font-family: var(--font-sans); font-size: 11px; }
+.pendant-top-controls { padding: 12px 14px; }
+.btn-mode-select, .btn-step, .btn-pendant-tool, .btn-pendant-stop { min-height: 38px; font-size: 12px; }
+.jog-pad-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.jog-axis-card { padding: 12px; }
+.jog-axis-name { font-size: 12px; }
+.jog-axis-val { font-size: 15px; }
+.btn-jog { min-height: 42px; font-size: 13px; }
+.wp-toolbar { padding: 12px; }
+.btn-wp-acquire, .btn-wp-action, .btn-wp-outline, .form-select-sm { min-height: 40px; font-size: 12px; }
+.wp-table { font-size: 13px; }
+.wp-table th { font-size: 11px; padding: 10px; }
+.wp-table td { padding: 10px; }
+.btn-wp-goto, .btn-wp-del { min-height: 32px; font-size: 11px; }
+
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(34, 211, 238, .55);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1180px) {
+  .hud-overlay { padding: 12px; }
+  .top-bar { gap: 12px; }
+  .sub-title, #btnLighting { display: none; }
+  .status-group { gap: 7px; }
+  .operator-rail { width: 330px; }
+  .programs-grid { grid-template-columns: repeat(2, 1fr); }
+  .diagnostics-grid { grid-template-columns: 1fr 1fr; }
+  .cam-presets .btn-cam:nth-of-type(n+3) { display: none; }
+}
+
+@media (max-width: 820px) {
+  body, html { overflow: auto; min-height: 100%; }
+  #canvas3d { position: fixed; }
+  .hud-overlay { position: relative; min-height: 100vh; gap: 12px; }
+  .top-bar { align-items: flex-start; flex-wrap: wrap; }
+  .brand-block { flex: 1; }
+  .status-group { width: 100%; flex-wrap: wrap; }
+  .status-group > * { flex: 1 1 auto; justify-content: center; }
+  .middle-row { min-height: 680px; align-items: flex-end; }
+  .operator-rail { width: 100%; }
+  .operator-rail .pallet-grid-hud { grid-template-columns: 1fr; }
+  .multi-center-panel { max-height: 80vh; }
+  .drawer-tabs-header { align-items: flex-start; gap: 10px; }
+  .tab-group { overflow-x: auto; }
+  .drawer-tab { white-space: nowrap; }
+  .cam-presets { display: none; }
+  .programs-grid, .diagnostics-grid, .jog-pad-grid { grid-template-columns: 1fr; }
+  .pendant-top-controls, .wp-toolbar, .wp-toolbar-left, .wp-toolbar-right { align-items: stretch; flex-direction: column; }
+  .wp-table-scroll { overflow-x: auto; }
+  .wp-table { min-width: 980px; }
+}

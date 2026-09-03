@@ -835,7 +835,14 @@ class PalletizerEngine:
             target_pose[5],
         ]
 
-    def _execute_cartesian_move(self, pose: List[float], vel_ratio: Optional[int] = None, acc_ratio: Optional[int] = None, step_name: str = "") -> bool:
+    def _execute_cartesian_move(
+        self,
+        pose: List[float],
+        vel_ratio: Optional[int] = None,
+        acc_ratio: Optional[int] = None,
+        step_name: str = "",
+        sim_q_target: Optional[List[float]] = None,
+    ) -> bool:
         """Executes a Cartesian straight-line linear move (MoveL) collinear with tool angle."""
         if step_name:
             self.status_msg = step_name
@@ -863,7 +870,7 @@ class PalletizerEngine:
                 self.is_moving = False
                 return False
         else:
-            return self._sim_cartesian_move(pose, 1.2, step_name)
+            return self._sim_cartesian_move(pose, 1.2, step_name, sim_q_target=sim_q_target)
 
     def _execute_move_home(self) -> bool:
         """Executes calibrated Move Home matching palletizing_with_plc.py."""
@@ -911,7 +918,14 @@ class PalletizerEngine:
         else:
             return self._sim_move(q_target, 1.2, step_name)
 
-    def _sim_cartesian_move(self, p_target: List[float], duration: float, step_name: str) -> bool:
+    def _sim_cartesian_move(
+        self,
+        p_target: List[float],
+        duration: float,
+        step_name: str,
+        sim_q_target: Optional[List[float]] = None,
+    ) -> bool:
+        """Animate a simulated MoveL and its calibrated visual joint pose together."""
         self.status_msg = step_name
         self.is_moving = True
         self.op_state = 6
@@ -920,6 +934,8 @@ class PalletizerEngine:
         steps = max(int(duration * 60), 2)
         p_start = np.array(self.p, dtype=float)
         p_end = np.array(p_target, dtype=float)
+        q_start = np.array(self.q, dtype=float)
+        q_end = np.array(sim_q_target, dtype=float) if sim_q_target is not None else None
 
         for step in range(steps):
             if self.abort_requested or self.stop_active:
@@ -933,10 +949,15 @@ class PalletizerEngine:
             cur_p = p_start + s * (p_end - p_start)
             with self.lock:
                 self.p = [round(float(v), 2) for v in cur_p]
+                if q_end is not None:
+                    cur_q = q_start + s * (q_end - q_start)
+                    self.q = [round(float(v), 4) for v in cur_q]
             time.sleep(1.0 / 60.0)
 
         with self.lock:
             self.p = list(p_target)
+            if q_end is not None:
+                self.q = list(sim_q_target)
             self.is_moving = False
             self.op_state = 5
             self.op_state_name = "OP_IDLE (5)"
@@ -947,7 +968,7 @@ class PalletizerEngine:
             self.stop_active = active
             if active:
                 self.abort_requested = True
-                self.status_msg = "EMERGENCY STOP TRIGGERED!"
+                self.status_msg = "Motion stop triggered (Category 2)"
                 if self.hardware_connected and self.indy:
                     try:
                         self.indy.stop_motion(StopCategory.CAT2)
@@ -955,6 +976,9 @@ class PalletizerEngine:
                         pass
             else:
                 self.abort_requested = False
+                if self.mode == "SIMULATION" and not self.is_moving:
+                    self.op_state = 5
+                    self.op_state_name = "OP_IDLE (5)"
                 self.status_msg = "Stop Cleared / Ready"
 
     def trigger_pb1_palletize(self):
@@ -1040,7 +1064,8 @@ class PalletizerEngine:
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Approach (Tilt: {PICK_LOCATION[3]}°)"}
             self.set_gripper(False)
             if not self._execute_cartesian_move(pick_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
+                                               step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["pick_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1049,7 +1074,8 @@ class PalletizerEngine:
             self.motion_phase = "PLUNGE"
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Plunge (Collinear @ {PICK_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(PICK_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)"):
+                                               step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["pick"]):
                 break
 
             # -------------------------------------------------------------
@@ -1070,7 +1096,8 @@ class PalletizerEngine:
             self.motion_phase = "EXTRACT"
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Extract MoveL (Collinear @ {PICK_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(pick_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
+                                               step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["pick_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1079,7 +1106,8 @@ class PalletizerEngine:
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Approach (Floor {floor}) @ {slot_pose[3]}°"}
             if not self._execute_cartesian_move(drop_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)"):
+                                               step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1088,7 +1116,8 @@ class PalletizerEngine:
             self.motion_phase = "PLUNGE"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Place Plunge (Z={slot_pose[2]}mm)"}
             if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
+                                               step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}"]):
                 break
 
             # -------------------------------------------------------------
@@ -1108,7 +1137,8 @@ class PalletizerEngine:
             self.motion_phase = "EXTRACT"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL @ {slot_pose[3]}°"}
             if not self._execute_cartesian_move(drop_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
+                                               step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}_approach"]):
                 break
 
         if not self.abort_requested and not self.stop_active:
@@ -1147,7 +1177,8 @@ class PalletizerEngine:
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Return Approach (Floor {floor})"}
             self.set_gripper(False)
             if not self._execute_cartesian_move(slot_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Slot {i+1} Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
+                                               step_name=f"[Return {i+1}] Slot {i+1} Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1156,7 +1187,8 @@ class PalletizerEngine:
             self.motion_phase = "PLUNGE"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Plunge to Grasp (Z={slot_pose[2]}mm)"}
             if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Plunging to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
+                                               step_name=f"[Return {i+1}] Plunging to Slot {i+1} MoveL (Z={slot_pose[2]}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}"]):
                 break
 
             # -------------------------------------------------------------
@@ -1176,7 +1208,8 @@ class PalletizerEngine:
             self.motion_phase = "EXTRACT"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL"}
             if not self._execute_cartesian_move(slot_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
+                                               step_name=f"[Return {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)",
+                                               sim_q_target=KNOWN_JOINTS[f"slot_{i}_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1185,7 +1218,8 @@ class PalletizerEngine:
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Top Approach @ {MAGAZINE_INSERT_LOCATION[3]}°"}
             if not self._execute_cartesian_move(mag_insert_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Feeder Top Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
+                                               step_name=f"[Return {i+1}] Feeder Top Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["mag_insert_approach"]):
                 break
 
             # -------------------------------------------------------------
@@ -1194,7 +1228,8 @@ class PalletizerEngine:
             self.motion_phase = "PLUNGE"
             self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Insert Plunge (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(MAGAZINE_INSERT_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Inserting into Feeder MoveL (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
+                                               step_name=f"[Return {i+1}] Inserting into Feeder MoveL (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["mag_insert"]):
                 break
 
             # -------------------------------------------------------------
@@ -1214,7 +1249,8 @@ class PalletizerEngine:
             self.motion_phase = "EXTRACT"
             self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Extract Retract MoveL @ {MAGAZINE_INSERT_LOCATION[3]}°"}
             if not self._execute_cartesian_move(mag_insert_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Feeder Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
+                                               step_name=f"[Return {i+1}] Feeder Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)",
+                                               sim_q_target=KNOWN_JOINTS["mag_insert_approach"]):
                 break
 
         if not self.abort_requested and not self.stop_active:

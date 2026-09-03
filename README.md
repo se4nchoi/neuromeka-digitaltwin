@@ -7,6 +7,8 @@ A real-time WebGL/Three.js 3D Digital Twin and multi-purpose robot control cente
 ![FastAPI](https://img.shields.io/badge/FastAPI-Modern%20Async-green)
 ![Three.js](https://img.shields.io/badge/Three.js-WebGL%203D-black)
 
+![Neuromeka Digital Twin](docs/digital_twin_neuromeka.jpg)
+
 ---
 
 ## Key Features

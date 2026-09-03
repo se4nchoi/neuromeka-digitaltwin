@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments & dependencies
+.venv
+neuromeka-package/
+
+# Scratch & development experiments / practice scripts
+src/indy/
+src/pick_and_place/
+src/plc_conn/
+src/prof_examples/
+src/hmi/
+src/neuromeka_digitaltwin/

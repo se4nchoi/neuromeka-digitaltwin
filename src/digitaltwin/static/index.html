@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Indy7 3D Digital Twin & Multi-Purpose Center</title>
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="/static/style.css">
+  
+  <script src="/static/three.min.js"></script>
+  <script src="/static/OrbitControls.js"></script>
+</head>
+<body>
+
+  <!-- Three.js 3D WebGL Canvas -->
+  <div id="canvas3d"></div>
+
+  <!-- FLOATING OFFLINE ALERT OVERLAY (Displayed when disconnected) -->
+  <div id="offlineOverlay" class="offline-overlay" style="display: none;">
+    <div class="offline-card glass-panel">
+      <div class="offline-header">
+        <span class="offline-icon">⚠️</span>
+        <div>
+          <div class="offline-title">NO CONNECTION TO INDY7 ROBOT</div>
+          <div class="offline-subtitle">Target IP: <strong id="offlineTargetIp">192.168.3.7:6066</strong></div>
+        </div>
+      </div>
+      <p class="offline-desc">
+        The digital twin cannot establish telemetry communication with the physical robot arm.
+        Please ensure the robot controller is powered on, Ethernet is linked, and IP is reachable.
+      </p>
+      <div class="offline-actions">
+        <button class="btn-reconnect-large" id="btnOverlayReconnect">
+          <span>⚡</span> RETRY CONNECTION
+        </button>
+        <button class="btn-sim-mode" id="btnOverlaySim">
+          <span>🔄</span> SWITCH TO 3D SIMULATION
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ACQUIRE WAYPOINT MODAL DIALOG -->
+  <div id="modalAcquireWp" class="modal-overlay" style="display: none;">
+    <div class="modal-card glass-panel hud-interactive">
+      <div class="modal-header">
+        <span class="modal-title">📌 ACQUIRE CURRENT WAYPOINT</span>
+        <button class="btn-modal-close" id="btnAcquireCancel">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Waypoint Name</label>
+          <input type="text" id="wpInputName" class="form-input" placeholder="e.g. Feeder_Pick_Plunge" value="">
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Motion Type</label>
+            <select id="wpInputType" class="form-select">
+              <option value="MoveJ">MoveJ (Joint Interpolation)</option>
+              <option value="MoveL">MoveL (Linear Cartesian)</option>
+            </select>
+          </div>
+          <div class="form-group flex-1">
+            <label>Gripper Action</label>
+            <select id="wpInputGripper" class="form-select">
+              <option value="keep">Keep Current State</option>
+              <option value="open">Open (DO0)</option>
+              <option value="close">Close (DO1)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Speed Ratio (%)</label>
+            <input type="number" id="wpInputSpeed" class="form-input" min="5" max="100" value="25">
+          </div>
+          <div class="form-group flex-1">
+            <label>Dwell Time (s)</label>
+            <input type="number" id="wpInputDwell" class="form-input" min="0" max="10" step="0.1" value="0.5">
+          </div>
+        </div>
+        <div class="preview-pose-box">
+          <div class="preview-title">CURRENT LIVE COORDINATES</div>
+          <div id="wpAcquirePreviewJoints" class="preview-line">Q: [0.0, 0.0, -90.0, 0.0, -90.0, 0.0]</div>
+          <div id="wpAcquirePreviewPose" class="preview-line">P: [350.0, -186.5, 522.0, 0.0, -180.0, 0.0]</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btnAcquireCancel2">Cancel</button>
+        <button class="btn-primary" id="btnAcquireConfirm">Save Waypoint</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- HUD OVERLAY CONTAINER -->
+  <div class="hud-overlay">
+
+    <!-- TOP CONTROL BAR -->
+    <header class="top-bar glass-panel hud-interactive">
+      <div class="brand-block">
+        <div class="logo-badge">I7</div>
+        <div class="title-col">
+          <span class="main-title">NEUROMEKA INDY7 &bull; MULTI-PURPOSE CENTER</span>
+          <span class="sub-title">3D DIGITAL TWIN &bull; WEB TEACH PENDANT &bull; WAYPOINT MISSION PLANNER</span>
+        </div>
+      </div>
+
+      <div class="status-group">
+        <!-- Connection State Badge -->
+        <div class="badge conn-disconnected" id="connStatusBadge">
+          <span class="conn-dot"></span>
+          <span id="connStatusText">NO CONNECTION</span>
+          <span id="telemetryHzBadge" class="hz-tag" style="display: none;">30 Hz</span>
+        </div>
+
+        <button class="btn-reconnect-mini" id="btnReconnect" title="Reconnect to Indy7 (192.168.3.7)">
+          ⚡ RECONNECT
+        </button>
+
+        <!-- OpState Badge -->
+        <div class="badge badge-idle" id="opBadge">
+          <span class="dot"></span>
+          <span id="opText">OP_IDLE (5)</span>
+        </div>
+
+        <!-- Mode Toggle & Lighting Mode -->
+        <button class="mode-toggle-btn" id="btnToggleMode">MODE: HARDWARE LIVE</button>
+        <button class="mode-toggle-btn" id="btnLighting" title="Switch Lighting Intensity (Bright / Ultra / Moody)">☀️ LIGHT: BRIGHT</button>
+        <button class="btn-drawer-toggle" id="btnDrawerToggle" title="Toggle Multi-Purpose Center Drawer">
+          <span>🛠️</span> MULTI-PURPOSE CENTER
+        </button>
+      </div>
+    </header>
+
+    <!-- MIDDLE WORKSPACE (LEFT & RIGHT GAUGES) -->
+    <div class="middle-row">
+
+      <!-- LEFT HUD: KINEMATICS & TCP POSE & I/O -->
+      <aside class="side-hud">
+        
+        <!-- 6-DOF Joint Angles Card -->
+        <div class="card glass-panel hud-interactive">
+          <div class="card-title-row">
+            <span class="card-title">6-DOF JOINT ANGLES</span>
+            <span class="card-tag">EXACT MDH</span>
+          </div>
+
+          <div id="jointsContainer">
+            <div class="joint-row" id="jRow0">
+              <span class="joint-label">J1</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar0"></div></div>
+              <span class="joint-val" id="jVal0">0.0°</span>
+            </div>
+            <div class="joint-row" id="jRow1">
+              <span class="joint-label">J2</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar1"></div></div>
+              <span class="joint-val" id="jVal1">0.0°</span>
+            </div>
+            <div class="joint-row" id="jRow2">
+              <span class="joint-label">J3</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar2"></div></div>
+              <span class="joint-val" id="jVal2">-90.0°</span>
+            </div>
+            <div class="joint-row" id="jRow3">
+              <span class="joint-label">J4</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar3"></div></div>
+              <span class="joint-val" id="jVal3">0.0°</span>
+            </div>
+            <div class="joint-row" id="jRow4">
+              <span class="joint-label">J5</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar4"></div></div>
+              <span class="joint-val" id="jVal4">-90.0°</span>
+            </div>
+            <div class="joint-row" id="jRow5">
+              <span class="joint-label">J6</span>
+              <div class="joint-bar-container"><div class="joint-bar-fill" id="jBar5"></div></div>
+              <span class="joint-val" id="jVal5">0.0°</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- TCP Pose Card -->
+        <div class="card glass-panel hud-interactive">
+          <div class="card-title-row">
+            <span class="card-title">END-EFFECTOR TCP POSE</span>
+            <span class="card-tag">CARTESIAN</span>
+          </div>
+
+          <div class="pose-grid">
+            <div class="pose-box">
+              <div class="pose-box-label">X (mm)</div>
+              <div class="pose-box-val" id="poseX">350.0</div>
+            </div>
+            <div class="pose-box">
+              <div class="pose-box-label">Y (mm)</div>
+              <div class="pose-box-val" id="poseY">-186.5</div>
+            </div>
+            <div class="pose-box">
+              <div class="pose-box-label">Z (mm)</div>
+              <div class="pose-box-val" id="poseZ">522.0</div>
+            </div>
+            <div class="pose-box">
+              <div class="pose-box-label">U (deg)</div>
+              <div class="pose-box-val" id="poseU">0.0°</div>
+            </div>
+            <div class="pose-box">
+              <div class="pose-box-label">V (deg)</div>
+              <div class="pose-box-val" id="poseV">-180.0°</div>
+            </div>
+            <div class="pose-box">
+              <div class="pose-box-label">W (deg)</div>
+              <div class="pose-box-val" id="poseW">0.0°</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Physical PLC / Robot I/O Card -->
+        <div class="card glass-panel hud-interactive">
+          <div class="card-title-row">
+            <span class="card-title">ROBOT & PLC I/O SIGNALS</span>
+            <span class="card-tag">HARDWARE</span>
+          </div>
+
+          <div class="io-grid">
+            <div class="io-item">
+              <span class="io-name">DI3 (SENSOR)</span>
+              <span class="io-pill" id="ioLedSensor">OFF</span>
+            </div>
+            <div class="io-item">
+              <span class="io-name">DI8 (PB1 START)</span>
+              <span class="io-pill" id="ioLedPb1">OFF</span>
+            </div>
+            <div class="io-item">
+              <span class="io-name">DI9 (PB2 RETURN)</span>
+              <span class="io-pill" id="ioLedPb2">OFF</span>
+            </div>
+            <div class="io-item">
+              <span class="io-name">DI15 (STOP)</span>
+              <span class="io-pill" id="ioLedStop">OFF</span>
+            </div>
+            <div class="io-item">
+              <span class="io-name">DO0 (GRIP OPEN)</span>
+              <span class="io-pill active-cyan" id="ioLedDo0">ON</span>
+            </div>
+            <div class="io-item">
+              <span class="io-name">DO1 (GRIP CLOSE)</span>
+              <span class="io-pill" id="ioLedDo1">OFF</span>
+            </div>
+          </div>
+        </div>
+
+      </aside>
+
+      <!-- RIGHT HUD: PALLET HUD & CYCLE EXECUTION -->
+      <aside class="side-hud">
+
+        <!-- Pallet 8-Slot Matrix Card -->
+        <div class="card glass-panel hud-interactive">
+          <div class="card-title-row">
+            <span class="card-title">PALLET MATRIX (2-FLOOR 2x2)</span>
+            <span class="card-tag" id="palletCountTag">0 / 8 PLACED</span>
+          </div>
+
+          <div class="pallet-grid-hud">
+            <div class="floor-group">
+              <div class="floor-header">FLOOR 0 (BOTTOM)</div>
+              <div class="floor-cells">
+                <div class="slot-cell" id="slotCell0"><span>S1</span><span>Z+0</span></div>
+                <div class="slot-cell" id="slotCell1"><span>S2</span><span>Z+0</span></div>
+                <div class="slot-cell" id="slotCell2"><span>S3</span><span>Z+0</span></div>
+                <div class="slot-cell" id="slotCell3"><span>S4</span><span>Z+0</span></div>
+              </div>
+            </div>
+
+            <div class="floor-group">
+              <div class="floor-header">FLOOR 1 (TOP +30mm)</div>
+              <div class="floor-cells">
+                <div class="slot-cell" id="slotCell4"><span>S5</span><span>Z+30</span></div>
+                <div class="slot-cell" id="slotCell5"><span>S6</span><span>Z+30</span></div>
+                <div class="slot-cell" id="slotCell6"><span>S7</span><span>Z+30</span></div>
+                <div class="slot-cell" id="slotCell7"><span>S8</span><span>Z+30</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); padding-top: 4px;">
+            <span>FEEDER: <strong id="feederCountText" style="color: #fff;">8 / 8</strong></span>
+            <span>TACT: <strong id="tactTimeText" style="color: var(--accent-emerald);">0.00s</strong></span>
+          </div>
+        </div>
+
+        <!-- Live Sequence Status Ticker -->
+        <div class="card glass-panel hud-interactive">
+          <div class="card-title-row">
+            <span class="card-title">CYCLE EXECUTION STATUS</span>
+            <span class="card-tag" id="activeProgTag">IDLE</span>
+          </div>
+          <div class="status-ticker" id="sequenceStatusTicker">
+            Connecting to Indy7 at 192.168.3.7...
+          </div>
+          <div class="motion-phase-box" id="motionPhaseBox">
+            <div class="motion-phase-header">
+              <span class="motion-phase-tag" id="motionPhaseTag">PHASE: IDLE</span>
+              <span class="motion-angle-tag" id="motionAngleTag">U: 0.0° | V: -180.0° | W: 0.0°</span>
+            </div>
+            <div class="motion-phase-desc" id="motionPhaseDesc">Approach & Extract Collinear Angle Ready</div>
+          </div>
+          <div class="seq-progress-bar-container" id="seqProgressContainer" style="display: none;">
+            <div class="seq-progress-bar-fill" id="seqProgressBar"></div>
+          </div>
+        </div>
+
+        <!-- Gripper & Trajectory Controls -->
+        <div class="card glass-panel hud-interactive" style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 11px; font-weight: 700; color: var(--text-muted);">PNEUMATIC GRIPPER</div>
+            <div id="gripperStatusText" style="font-family: var(--font-mono); font-size: 12px; color: var(--accent-cyan);">OPEN (DO0)</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-toggle-sensor" id="btnQuickGripper">TOGGLE JAW</button>
+            <button class="btn-toggle-sensor" id="btnClearTrail">CLEAR TRAIL</button>
+          </div>
+        </div>
+
+      </aside>
+
+    </div>
+
+    <!-- MULTI-PURPOSE CENTER DRAWER / PANEL -->
+    <div class="multi-center-panel glass-panel hud-interactive" id="multiCenterDrawer">
+
+      <!-- Center Tabs Header -->
+      <div class="drawer-tabs-header">
+        <div class="tab-group">
+          <button class="drawer-tab active" data-tab="tab-programs">
+            <span>🚀</span> ACTION PROGRAMS
+          </button>
+          <button class="drawer-tab" data-tab="tab-pendant">
+            <span>🎮</span> WEB TEACH PENDANT
+          </button>
+          <button class="drawer-tab" data-tab="tab-waypoints">
+            <span>📍</span> WAYPOINTS & MISSION PLANNER
+          </button>
+        </div>
+
+        <!-- Camera Presets -->
+        <div class="cam-presets">
+          <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); align-self: center; margin-right: 4px;">CAM:</span>
+          <button class="btn-cam active" id="camIso">ISOMETRIC</button>
+          <button class="btn-cam" id="camTop">TOP-DOWN</button>
+          <button class="btn-cam" id="camFeeder">FEEDER (-19.5°)</button>
+          <button class="btn-cam" id="camPallet">PALLET (2x2)</button>
+          <button class="btn-drawer-collapse" id="btnDrawerCollapse" title="Minimize / Expand Multi-Center Drawer">▾</button>
+        </div>
+      </div>
+
+      <!-- Center Drawer Body -->
+      <div class="drawer-body" id="drawerBody">
+
+        <!-- ===============================================================
+             TAB 1: ACTION PROGRAMS
+             =============================================================== -->
+        <div class="tab-content active" id="tab-programs">
+          <div class="programs-grid">
+            
+            <!-- Program 1: Palletizing Loop -->
+            <div class="program-card">
+              <div class="program-card-header">
+                <span class="program-icon">📦</span>
+                <div>
+                  <div class="program-title">8-Slot Palletizing Loop</div>
+                  <div class="program-subtitle">PLC X103 / PB1 &bull; 2-Floor 2x2 Grid</div>
+                </div>
+              </div>
+              <p class="program-desc">Transits to slanted feeder (-19.5°), grasps billets, and places onto 8 pallet slots across 2 floors with collinear retracts.</p>
+              <div class="program-actions">
+                <button class="btn-prog-run btn-pb1" id="btnProgPalletize">▶ START PALLETIZE</button>
+              </div>
+            </div>
+
+            <!-- Program 2: Put-Back LIFO Depalletize -->
+            <div class="program-card">
+              <div class="program-card-header">
+                <span class="program-icon">↺</span>
+                <div>
+                  <div class="program-title">LIFO Put-Back Depalletizer</div>
+                  <div class="program-subtitle">PLC X104 / PB2 &bull; Feeder Insert</div>
+                </div>
+              </div>
+              <p class="program-desc">Picks workpieces in reverse order from pallet top floor down, transits to magazine top, and inserts back into feeder chute.</p>
+              <div class="program-actions">
+                <button class="btn-prog-run btn-pb2" id="btnProgPutBack">↺ START PUT-BACK</button>
+              </div>
+            </div>
+
+            <!-- Program 3: Calibration & Motion Routines -->
+            <div class="program-card">
+              <div class="program-card-header">
+                <span class="program-icon">🎯</span>
+                <div>
+                  <div class="program-title">Kinematic Calibration Routines</div>
+                  <div class="program-subtitle">Home / Zero / Safe Positions</div>
+                </div>
+              </div>
+              <p class="program-desc">Calibrated joint space positions. Home reaches forward horizontally [0, 0, -90, 0, -90, 0]; Zero aligns all joint axes [0, 0, 0, 0, 0, 0].</p>
+              <div class="program-actions-row">
+                <button class="btn-action-sm" id="btnProgHome">🏠 GO HOME</button>
+                <button class="btn-action-sm" id="btnProgZero">📏 GO ZERO</button>
+                <button class="btn-action-sm" id="btnProgResetPallet">🔄 RESET STACK</button>
+              </div>
+            </div>
+
+            <!-- Program 4: Safety & Direct Teaching -->
+            <div class="program-card">
+              <div class="program-card-header">
+                <span class="program-icon">🛡️</span>
+                <div>
+                  <div class="program-title">Safety & Direct Teaching</div>
+                  <div class="program-subtitle">Zero-G Compliant Guiding & Stop</div>
+                </div>
+              </div>
+              <p class="program-desc">Zero-G direct teaching enables manual hand guiding on the physical robot. Emergency stop triggers Cat2 motion halt.</p>
+              <div class="program-actions-row">
+                <button class="btn-action-sm" id="btnToggleDirectTeach">👐 DIRECT TEACH: OFF</button>
+                <button class="btn-action-sm btn-recover-action" id="btnProgRecover">✨ RECOVER FAULT</button>
+                <button class="btn-stop-action" id="btnProgStop">⏹ EMERGENCY STOP</button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===============================================================
+             TAB 2: WEB TEACH PENDANT
+             =============================================================== -->
+        <div class="tab-content" id="tab-pendant">
+          <div class="pendant-container">
+
+            <!-- Pendant Header Controls -->
+            <div class="pendant-top-controls">
+              <div class="jog-mode-selector">
+                <button class="btn-mode-select active" id="btnJogModeJoint">JOINT JOG (J1-J6)</button>
+                <button class="btn-mode-select" id="btnJogModeTask">CARTESIAN JOG (X/Y/Z)</button>
+              </div>
+
+              <div class="pendant-step-selector">
+                <span class="pendant-label">STEP:</span>
+                <div class="step-btn-group" id="jointStepGroup">
+                  <button class="btn-step" data-step="0.5">0.5°</button>
+                  <button class="btn-step active" data-step="1.0">1.0°</button>
+                  <button class="btn-step" data-step="5.0">5.0°</button>
+                  <button class="btn-step" data-step="10.0">10.0°</button>
+                </div>
+                <div class="step-btn-group" id="taskStepGroup" style="display: none;">
+                  <button class="btn-step" data-step="1.0">1mm</button>
+                  <button class="btn-step active" data-step="5.0">5mm</button>
+                  <button class="btn-step" data-step="10.0">10mm</button>
+                  <button class="btn-step" data-step="25.0">25mm</button>
+                  <button class="btn-step" data-step="50.0">50mm</button>
+                </div>
+              </div>
+
+              <!-- Speed Override Slider -->
+              <div class="speed-override-box">
+                <span class="pendant-label">SPEED:</span>
+                <input type="range" id="pendantSpeedSlider" min="5" max="100" value="25" class="speed-slider">
+                <span id="pendantSpeedVal" class="speed-val">25%</span>
+              </div>
+
+              <!-- Tool & Stop -->
+              <div class="pendant-tool-box">
+                <button class="btn-pendant-tool" id="btnPendantGripperOpen">DO0: OPEN JAW</button>
+                <button class="btn-pendant-tool" id="btnPendantGripperClose">DO1: CLOSE JAW</button>
+                <button class="btn-pendant-stop" id="btnPendantStopJog">⏹ HALT</button>
+              </div>
+            </div>
+
+            <!-- Joint Jog Pad (J1 to J6) -->
+            <div id="jointJogPad" class="jog-pad-grid">
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J1 (BASE YAW)</span>
+                  <span class="jog-axis-val" id="jogValJ1">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="0" data-dir="-1">- J1</button>
+                  <button class="btn-jog" data-type="joint" data-idx="0" data-dir="1">+ J1</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J2 (SHOULDER)</span>
+                  <span class="jog-axis-val" id="jogValJ2">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="1" data-dir="-1">- J2</button>
+                  <button class="btn-jog" data-type="joint" data-idx="1" data-dir="1">+ J2</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J3 (ELBOW)</span>
+                  <span class="jog-axis-val" id="jogValJ3">-90.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="2" data-dir="-1">- J3</button>
+                  <button class="btn-jog" data-type="joint" data-idx="2" data-dir="1">+ J3</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J4 (WRIST 1 ROLL)</span>
+                  <span class="jog-axis-val" id="jogValJ4">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="3" data-dir="-1">- J4</button>
+                  <button class="btn-jog" data-type="joint" data-idx="3" data-dir="1">+ J4</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J5 (WRIST 2 PITCH)</span>
+                  <span class="jog-axis-val" id="jogValJ5">-90.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="4" data-dir="-1">- J5</button>
+                  <button class="btn-jog" data-type="joint" data-idx="4" data-dir="1">+ J5</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">J6 (TOOL FLANGE)</span>
+                  <span class="jog-axis-val" id="jogValJ6">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="joint" data-idx="5" data-dir="-1">- J6</button>
+                  <button class="btn-jog" data-type="joint" data-idx="5" data-dir="1">+ J6</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Cartesian Task Jog Pad (X, Y, Z, U, V, W) -->
+            <div id="taskJogPad" class="jog-pad-grid" style="display: none;">
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">X (SURGE)</span>
+                  <span class="jog-axis-val" id="jogValX">350.0 mm</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="x" data-dir="-1">- X</button>
+                  <button class="btn-jog" data-type="task" data-axis="x" data-dir="1">+ X</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">Y (SWAY)</span>
+                  <span class="jog-axis-val" id="jogValY">-186.5 mm</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="y" data-dir="-1">- Y</button>
+                  <button class="btn-jog" data-type="task" data-axis="y" data-dir="1">+ Y</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">Z (HEAVE)</span>
+                  <span class="jog-axis-val" id="jogValZ">522.0 mm</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="z" data-dir="-1">- Z</button>
+                  <button class="btn-jog" data-type="task" data-axis="z" data-dir="1">+ Z</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">U (ROLL)</span>
+                  <span class="jog-axis-val" id="jogValU">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="u" data-dir="-1">- U</button>
+                  <button class="btn-jog" data-type="task" data-axis="u" data-dir="1">+ U</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">V (PITCH)</span>
+                  <span class="jog-axis-val" id="jogValV">-180.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="v" data-dir="-1">- V</button>
+                  <button class="btn-jog" data-type="task" data-axis="v" data-dir="1">+ V</button>
+                </div>
+              </div>
+
+              <div class="jog-axis-card">
+                <div class="jog-axis-info">
+                  <span class="jog-axis-name">W (YAW)</span>
+                  <span class="jog-axis-val" id="jogValW">0.0°</span>
+                </div>
+                <div class="jog-btn-pair">
+                  <button class="btn-jog" data-type="task" data-axis="w" data-dir="-1">- W</button>
+                  <button class="btn-jog" data-type="task" data-axis="w" data-dir="1">+ W</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===============================================================
+             TAB 3: WAYPOINTS & MISSION PLANNER
+             =============================================================== -->
+        <div class="tab-content" id="tab-waypoints">
+          <div class="waypoints-container">
+            
+            <!-- Waypoint Toolbar -->
+            <div class="wp-toolbar">
+              <div class="wp-toolbar-left">
+                <button class="btn-wp-acquire" id="btnAcquireCurrentPose">
+                  <span>📍</span> ACQUIRE CURRENT WAYPOINT
+                </button>
+                <button class="btn-wp-action" id="btnRunSequence">
+                  <span>▶</span> RUN SEQUENCE
+                </button>
+                <button class="btn-wp-action btn-danger" id="btnStopSequence">
+                  <span>⏹</span> STOP
+                </button>
+                <div class="seq-repeat-box">
+                  <span class="pendant-label">CYCLES:</span>
+                  <select id="seqRepeatCount" class="form-select-sm">
+                    <option value="1">1 Cycle</option>
+                    <option value="3">3 Cycles</option>
+                    <option value="5">5 Cycles</option>
+                    <option value="0">Continuous</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="wp-toolbar-right">
+                <button class="btn-wp-outline" id="btnSaveWpToDisk">💾 SAVE TO DISK</button>
+                <button class="btn-wp-outline" id="btnReloadWp">↺ RELOAD</button>
+              </div>
+            </div>
+
+            <!-- Waypoint Table -->
+            <div class="wp-table-scroll">
+              <table class="wp-table">
+                <thead>
+                  <tr>
+                    <th style="width: 40px;">#</th>
+                    <th>WAYPOINT NAME</th>
+                    <th>TYPE</th>
+                    <th>CARTESIAN POSE [X, Y, Z (mm)]</th>
+                    <th>JOINT ANGLES (Q)</th>
+                    <th>SPEED</th>
+                    <th>GRIPPER</th>
+                    <th>DWELL</th>
+                    <th style="width: 140px; text-align: right;">ACTIONS</th>
+                  </tr>
+                </thead>
+                <tbody id="wpTableBody">
+                  <!-- Dynamically populated -->
+                </tbody>
+              </table>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Digital Twin Main Script -->
+  <script src="/static/digitaltwin.js"></script>
+</body>
+</html>

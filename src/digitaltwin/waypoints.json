@@ -1,0 +1,72 @@
+[
+  {
+    "id": "wp_home",
+    "name": "Home Position",
+    "move_type": "MoveJ",
+    "q": [0.0, 0.0, -90.0, 0.0, -90.0, 0.0],
+    "p": [350.0, -186.5, 522.0, 0.0, -180.0, 0.0],
+    "speed": 25,
+    "gripper": "keep",
+    "dwell": 0.5
+  },
+  {
+    "id": "wp_feeder_app",
+    "name": "Feeder Approach (-19.52°)",
+    "move_type": "MoveJ",
+    "q": [74.5, -29.2, -78.1, 19.5, -73.8, -20.0],
+    "p": [259.22, 515.06, 329.59, -19.52, -179.64, 90.03],
+    "speed": 25,
+    "gripper": "open",
+    "dwell": 0.3
+  },
+  {
+    "id": "wp_feeder_pick",
+    "name": "Feeder Pick Plunge (-19.52°)",
+    "move_type": "MoveL",
+    "q": [76.12, -37.44, -74.59, 19.62, -74.11, -20.29],
+    "p": [232.49, 514.57, 254.19, -19.52, -179.64, 90.03],
+    "speed": 20,
+    "gripper": "close",
+    "dwell": 0.5
+  },
+  {
+    "id": "wp_feeder_extract",
+    "name": "Feeder Extract Retract (-19.52°)",
+    "move_type": "MoveL",
+    "q": [74.5, -29.2, -78.1, 19.5, -73.8, -20.0],
+    "p": [259.22, 515.06, 329.59, -19.52, -179.64, 90.03],
+    "speed": 20,
+    "gripper": "keep",
+    "dwell": 0.3
+  },
+  {
+    "id": "wp_pallet_app",
+    "name": "Pallet Slot 1 Approach (-3.24°)",
+    "move_type": "MoveJ",
+    "q": [82.8, -4.5, -120.5, 3.85, -54.8, -9.2],
+    "p": [206.27, 220.07, 384.81, -3.24, -179.44, 90.01],
+    "speed": 25,
+    "gripper": "keep",
+    "dwell": 0.3
+  },
+  {
+    "id": "wp_pallet_place",
+    "name": "Pallet Slot 1 Place Plunge (-3.24°)",
+    "move_type": "MoveL",
+    "q": [83.01, 3.74, -129.91, 3.85, -54.84, -9.23],
+    "p": [201.75, 219.29, 304.94, -3.24, -179.44, 90.01],
+    "speed": 20,
+    "gripper": "open",
+    "dwell": 0.5
+  },
+  {
+    "id": "wp_pallet_extract",
+    "name": "Pallet Slot 1 Extract Retract (-3.24°)",
+    "move_type": "MoveL",
+    "q": [82.8, -4.5, -120.5, 3.85, -54.8, -9.2],
+    "p": [206.27, 220.07, 384.81, -3.24, -179.44, 90.01],
+    "speed": 20,
+    "gripper": "keep",
+    "dwell": 0.3
+  }
+]

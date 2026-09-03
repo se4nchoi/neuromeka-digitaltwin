@@ -1,0 +1,19 @@
+[project]
+name = "neuromeka-digitaltwin"
+version = "0.1.0"
+description = "Indy Robot 3D Digital Twin & HMI Dashboard"
+readme = "README.md"
+authors = [
+    { name = "khsbl00190-cell", email = "khsbl00190@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "websockets>=17.1",
+    "numpy>=1.26.4",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"

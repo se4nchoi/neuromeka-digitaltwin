@@ -1,12 +1,16 @@
 # Configuration and calibrated constants for Indy7 3D Digital Twin & Palletizer.
+import os
 
 # Server configuration
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 8088
+SERVER_HOST = os.getenv("DIGITALTWIN_HOST", "127.0.0.1")
+SERVER_PORT = int(os.getenv("DIGITALTWIN_PORT", "8088"))
+STARTUP_MODE = os.getenv("DIGITALTWIN_MODE", "SIMULATION").upper()
+if STARTUP_MODE not in {"SIMULATION", "HARDWARE_LIVE"}:
+    raise ValueError("DIGITALTWIN_MODE must be SIMULATION or HARDWARE_LIVE")
 TELEMETRY_HZ = 30  # WebSocket push frequency
 
 # Hardware Defaults
-DEFAULT_ROBOT_IP = "192.168.3.7"
+DEFAULT_ROBOT_IP = os.getenv("DIGITALTWIN_ROBOT_IP", "192.168.3.7")
 DEFAULT_ROBOT_INDEX = 0
 
 # Calibrated Workcell Task Coordinates [X, Y, Z (mm), U, V, W (deg)]

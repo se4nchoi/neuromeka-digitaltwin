@@ -2,6 +2,134 @@ import math
 import numpy as np
 from typing import List, Tuple
 
+
+class UnreachablePose(ValueError):
+    """The configured kinematic model cannot track the requested pose/path."""
+
+
+def joint_transforms(q):
+    """Unrounded base-to-link transforms for the same Craig chain as the viewer."""
+    transform = np.eye(4)
+    frames = []
+    for angle, p in zip(q, MDH_PARAMS):
+        alpha, theta = np.radians([p['alpha'], p['theta0'] + angle])
+        ca, sa, ct, st = np.cos(alpha), np.sin(alpha), np.cos(theta), np.sin(theta)
+        transform = transform @ np.array([
+            [ct, -st, 0, p['a']],
+            [ca * st, ca * ct, -sa, -sa * p['d']],
+            [sa * st, sa * ct, ca, ca * p['d']],
+            [0, 0, 0, 1],
+        ])
+        frames.append(transform)
+    return frames
+
+
+def pose_transform(pose):
+    """TCP [mm, mm, mm, roll°, pitch°, yaw°], R = Rz(yaw) Ry(pitch) Rx(roll)."""
+    pose = np.asarray(pose, dtype=float)
+    if pose.shape != (6,) or not np.isfinite(pose).all():
+        raise UnreachablePose('TCP pose must contain six finite values')
+    u, v, w = np.radians(pose[3:])
+    cu, su, cv, sv, cw, sw = np.cos(u), np.sin(u), np.cos(v), np.sin(v), np.cos(w), np.sin(w)
+    transform = np.eye(4)
+    transform[:3, :3] = [
+        [cw*cv, cw*sv*su-sw*cu, cw*sv*cu+sw*su],
+        [sw*cv, sw*sv*su+cw*cu, sw*sv*cu-cw*su],
+        [-sv, cv*su, cv*cu],
+    ]
+    transform[:3, 3] = pose[:3]
+    return transform
+
+
+def rotation_vector(rotation):
+    """Shortest rotation logarithm, including the 180-degree case."""
+    cosine = np.clip((np.trace(rotation) - 1) / 2, -1, 1)
+    angle = np.arccos(cosine)
+    skew = np.array([rotation[2, 1]-rotation[1, 2],
+                     rotation[0, 2]-rotation[2, 0], rotation[1, 0]-rotation[0, 1]])
+    if angle < 1e-7:
+        return skew / 2
+    if np.pi - angle < 1e-5:
+        _, vectors = np.linalg.eigh((rotation + rotation.T) / 2)
+        axis = vectors[:, -1]
+        if np.dot(axis, skew) < 0:
+            axis = -axis
+        return angle * axis
+    return angle * skew / (2 * np.sin(angle))
+
+
+def rotation_exp(vector):
+    angle = np.linalg.norm(vector)
+    if angle < 1e-12:
+        return np.eye(3)
+    x, y, z = vector / angle
+    skew = np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
+    return np.eye(3) + np.sin(angle)*skew + (1-np.cos(angle))*(skew @ skew)
+
+
+def inverse_kinematics(target, seed, max_iterations=100):
+    """Seeded damped least squares; returns continuous joint angles in degrees.
+
+    Target is a homogeneous transform. Tolerances are model-space, not hardware
+    accuracy claims. No robot joint-limit or collision model is applied here.
+    """
+    q = np.asarray(seed, dtype=float).copy()
+    if q.shape != (6,) or not np.isfinite(q).all():
+        raise UnreachablePose('Joint seed must contain six finite values')
+    scale = 300.0  # Normalize mm against angular error in radians.
+
+    def error(transform):
+        return np.r_[(target[:3, 3]-transform[:3, 3])/scale,
+                     rotation_vector(target[:3, :3] @ transform[:3, :3].T)]
+
+    for _ in range(max_iterations):
+        frames = joint_transforms(q)
+        current = frames[-1]
+        residual = error(current)
+        if np.linalg.norm(residual[:3])*scale < 0.02 and np.linalg.norm(residual[3:]) < 1e-4:
+            return q.tolist()
+        jacobian = np.column_stack([
+            np.r_[np.cross(frame[:3, 2], current[:3, 3]-frame[:3, 3])/scale, frame[:3, 2]]
+            for frame in frames
+        ])
+        delta = jacobian.T @ np.linalg.solve(jacobian @ jacobian.T + 0.001**2*np.eye(6), residual)
+        delta *= min(1.0, 0.2 / max(np.max(np.abs(delta)), 1e-12))
+        # Backtracking avoids a large update making a near-singular pose worse.
+        for factor in (1.0, 0.5, 0.25, 0.125, 0.0625):
+            candidate = q + np.degrees(delta)*factor
+            if np.linalg.norm(error(joint_transforms(candidate)[-1])) < np.linalg.norm(residual):
+                q = candidate
+                break
+        else:
+            break
+    raise UnreachablePose('Cartesian path is unreachable or singular in the configured robot model')
+
+
+def cartesian_trajectory(q_start, pose_target, duration, hz=60, cancelled=lambda: False):
+    """Preflight a straight TCP path with shortest-rotation interpolation.
+
+    Each sample uses the preceding solution as its seed. Fail before playback if
+    the path cannot be followed continuously; never substitute a joint-space arc.
+    """
+    start = joint_transforms(q_start)[-1]
+    end = pose_transform(pose_target)
+    rotation = rotation_vector(end[:3, :3] @ start[:3, :3].T)
+    seed = list(q_start)
+    trajectory = []
+    for tau in np.linspace(0, 1, max(int(duration * hz), 2)):
+        if cancelled():
+            raise InterruptedError('Cartesian planning stopped')
+        blend = 10*tau**3 - 15*tau**4 + 6*tau**5
+        target = np.eye(4)
+        target[:3, 3] = start[:3, 3] + blend*(end[:3, 3]-start[:3, 3])
+        target[:3, :3] = rotation_exp(blend*rotation) @ start[:3, :3]
+        q = inverse_kinematics(target, seed)
+        if np.max(np.abs(np.asarray(q)-seed)) > 15:
+            raise UnreachablePose('Cartesian path requires a discontinuous joint step')
+        trajectory.append(q)
+        seed = q
+    return trajectory
+
 # Exact MDH Parameters for Neuromeka Indy7
 MDH_PARAMS = [
     {'d': 300.0, 'a': 0.0,   'alpha': 0.0,  'theta0': 0.0},

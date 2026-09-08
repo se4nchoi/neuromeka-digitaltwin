@@ -141,6 +141,24 @@
 
       <!-- LEFT HUD: KINEMATICS & TCP POSE & I/O -->
       <aside class="side-hud">
+        <details class="card glass-panel hud-interactive" id="workcellDiagnostics">
+          <summary class="card-title">WORKCELL · <span id="workcellState">CONNECTING</span></summary>
+          <p id="workcellFault" style="margin: 10px 0; font-size: 12px; overflow-wrap: anywhere;">No active fault</p>
+          <label for="faultCode" style="font-size: 12px;">Simulation fault</label>
+          <select id="faultCode" class="form-select" style="width: 100%; margin: 8px 0;">
+            <option value="FEEDER_EMPTY">Feeder empty</option>
+            <option value="SENSOR_TIMEOUT">Sensor timeout</option>
+            <option value="MOTION_TIMEOUT">Motion timeout</option>
+            <option value="CONNECTION_LOST">Connection lost</option>
+          </select>
+          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <button class="mode-toggle-btn" id="injectFault">Inject fault</button>
+            <button class="mode-toggle-btn" id="resetDemoCell">Reset simulated cell</button>
+            <button class="mode-toggle-btn" id="recoverCell">Recover</button>
+          </div>
+          <p id="commandResult" role="status" style="font-size: 12px; margin-top: 8px; overflow-wrap: anywhere;">Ready for commands</p>
+          <p style="font-size: 11px; opacity: .7; margin-top: 8px;">After recovery, start a new program; interrupted steps do not resume. Application stop is separate from physical safety equipment.</p>
+        </details>
         
         <!-- 6-DOF Joint Angles Card -->
         <div class="card glass-panel hud-interactive">
@@ -423,11 +441,11 @@
                   <div class="program-subtitle">Zero-G Compliant Guiding & Stop</div>
                 </div>
               </div>
-              <p class="program-desc">Zero-G direct teaching enables manual hand guiding on the physical robot. Emergency stop triggers Cat2 motion halt.</p>
+              <p class="program-desc">Zero-G direct teaching enables manual hand guiding on the physical robot. Application stop requests a controller motion halt; physical emergency-stop protection is separate.</p>
               <div class="program-actions-row">
                 <button class="btn-action-sm" id="btnToggleDirectTeach">👐 DIRECT TEACH: OFF</button>
                 <button class="btn-action-sm btn-recover-action" id="btnProgRecover">✨ RECOVER FAULT</button>
-                <button class="btn-stop-action" id="btnProgStop">⏹ EMERGENCY STOP</button>
+                <button class="btn-stop-action" id="btnProgStop">⏹ APPLICATION STOP</button>
               </div>
             </div>
 
@@ -686,6 +704,7 @@
   </div>
 
   <!-- Digital Twin Main Script -->
+  <script src="/static/workcell.js"></script>
   <script src="/static/digitaltwin.js"></script>
 </body>
 </html>

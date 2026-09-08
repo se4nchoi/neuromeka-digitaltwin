@@ -2,6 +2,17 @@
 
 A real-time WebGL/Three.js 3D Digital Twin and multi-purpose robot control center for the **Neuromeka Indy7** 6-DOF industrial collaborative robot.
 
+## Portfolio foundation milestone
+
+The application now starts in **simulation on localhost**, with no robot connection attempted during import or default startup. REST, WebSocket, and physical program starts share command validation and execution ownership. The Workcell panel exposes state, simulated faults, recovery, and command outcomes.
+
+- [Architecture, behavior, and current limitations](docs/foundation.md)
+- [Repeatable demonstration and verification](docs/demo.md)
+- [Recorded simulation baseline](artifacts/simulation-baseline.json)
+- [Remaining portfolio roadmap](docs/roadmap.md)
+
+Run the behavior and HTTP/WebSocket integration tests with `uv run python -m unittest discover -s tests -v`.
+
 ![Digital Twin Overview](https://img.shields.io/badge/Robotics-Neuromeka%20Indy7-orange)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Modern%20Async-green)
@@ -17,13 +28,13 @@ A real-time WebGL/Three.js 3D Digital Twin and multi-purpose robot control cente
   - Dynamic dual-jaw pneumatic gripper and workpiece visualization with state transitions.
 
 - **Dual-Mode Operation**:
-  - **Simulation Mode**: Run full 5th-order polynomial (quintic) kinematic trajectories entirely inside the browser without physical hardware.
+  - **Simulation Mode**: Run backend quintic kinematic interpolation without physical hardware. Cartesian paths use numerical inverse kinematics to animate the robot joints with a consistent TCP pose. Unreachable or discontinuous paths fault before playback. Collision checking, dynamics, and hardware joint-limit validation are not modeled.
   - **Live Hardware Control**: Connect to the real Indy7 controller via TCP/IP using Neuromeka `IndyDCP3`.
 
 - **Palletizing & Motion Engine**:
   - Pure Cartesian `MoveL` collinear approach and retraction motions along tool orientation vector ($U, V, W$).
   - Palletizing and put-back routines with coordinate calculation for grid slots and multi-layer palletizing.
-  - Physical PLC industrial I/O trigger integration (DI8 for palletize, DI9 for put-back, DI15 for emergency stop).
+  - Physical PLC industrial I/O trigger integration (DI8 for palletize, DI9 for put-back, DI15 for application stop). This application is not a safety-rated emergency-stop system.
 
 - **Multi-Purpose Control Center**:
   - **Web Teach Pendant**: Joint space ($\pm J_1 \dots J_6$) and Cartesian task space ($\pm X, Y, Z, U, V, W$) jog commands.
@@ -69,7 +80,7 @@ git clone <repository-url>
 cd neuromeka-digitaltwin
 
 # Install dependencies using uv
-uv sync
+uv sync --frozen
 ```
 
 *Note: For live hardware execution, install the official Neuromeka Python DCP package:*
@@ -87,3 +98,13 @@ Open your browser and navigate to:
 ```text
 http://localhost:8088
 ```
+
+The default binds to `127.0.0.1`. For explicit hardware startup in PowerShell, install the optional Neuromeka SDK first, then run:
+
+```powershell
+$env:DIGITALTWIN_MODE = "HARDWARE_LIVE"
+$env:DIGITALTWIN_ROBOT_IP = "192.168.3.7"
+uv run python run_digitaltwin.py
+```
+
+Set `DIGITALTWIN_MODE` back to `SIMULATION` for the hardware-free demo. Geometry and I/O mappings remain in `src/digitaltwin/config.py`; environment options are listed in `.env.example` (not automatically loaded).

@@ -1,0 +1,23 @@
+{
+  "source": "kinematic_simulation",
+  "python": "3.12.14",
+  "duration_seconds": 75.484,
+  "parts_placed": 8,
+  "command_status": "completed",
+  "fault": null,
+  "motion_samples": 2255,
+  "joint_range_degrees": [
+    104.599,
+    58.195,
+    73.556,
+    19.617,
+    36.202,
+    33.211
+  ],
+  "max_fk_position_error_mm": 0.00826,
+  "limitations": [
+    "Single run, not a statistical performance study",
+    "Fixed motion durations; numerical inverse kinematics, no collision, dynamics, or hardware joint-limit validation",
+    "Not measured robot throughput"
+  ]
+}

@@ -13,10 +13,14 @@ import json
 import time
 import math
 import threading
+import logging
+import uuid
+from .drivers import HardwareDriver, SimulationDriver
 import numpy as np
 from typing import Dict, List, Optional
 from .config import (
     DEFAULT_ROBOT_IP,
+    STARTUP_MODE,
     PICK_LOCATION,
     DROP_BASE_LOCATION,
     MAGAZINE_INSERT_LOCATION,
@@ -122,17 +126,17 @@ def forward_kinematics_craig(q_deg: List[float]) -> List[float]:
 
 
 class PalletizerEngine:
-    def __init__(self):
+    def __init__(self, startup_mode=None):
         self.lock = threading.RLock()
         self.robot_ip = DEFAULT_ROBOT_IP
         self.indy: Optional[IndyDCP3] = None
         self.hardware_connected = False
         self.mode = "DISCONNECTED"  # "HARDWARE_LIVE", "DISCONNECTED", "SIMULATION"
-        self.auto_reconnect = True
+        self.auto_reconnect = False
 
         # Robot Kinematic State
         self.q = list(HOME_JPOS)
-        self.p = [350.0, -186.5, 522.0, 0.0, -180.0, 0.0]
+        self.p = forward_kinematics_craig(self.q)
         self.op_state = 5  # IDLE
         self.op_state_name = "OP_IDLE (5)"
         self.is_moving = False
@@ -181,12 +185,115 @@ class PalletizerEngine:
         self.telemetry_hz_actual = 0.0
         self.last_telemetry_ts = 0.0
 
-        # Connect hardware on startup
-        self.connect_hardware(self.robot_ip)
+        self.startup_mode = startup_mode or STARTUP_MODE
+        self.poll_thread = None
+        self.fault = None
+        self.events = []
+        self.command_service = None
+        self.commands = []
+        self.simulation_driver = SimulationDriver(self, forward_kinematics_craig)
+        self.switch_to_simulation()
 
-        # Background worker for non-blocking 30Hz polling
+    def start(self):
+        """Start I/O only during application lifespan, never on import."""
+        if self.poll_thread and self.poll_thread.is_alive():
+            return
+        self.running = True
+        if self.startup_mode == "HARDWARE_LIVE":
+            self.connect_hardware(self.robot_ip)
         self.poll_thread = threading.Thread(target=self._telemetry_worker, daemon=True)
         self.poll_thread.start()
+
+    def close(self):
+        self.running = False
+        self.auto_reconnect = False
+        self.set_stop(True)
+        for thread in (self.active_thread, self.poll_thread):
+            if thread and thread is not threading.current_thread():
+                thread.join(timeout=3)
+
+    @property
+    def workcell_state(self):
+        if self.fault:
+            return "FAULTED"
+        if self.stop_active or self.abort_requested:
+            return "STOPPED"
+        if self.mode == "DISCONNECTED":
+            return "DISCONNECTED"
+        if self.sequence_running or self.is_moving:
+            return "RUNNING"
+        return "IDLE"
+
+    def raise_fault(self, code, message):
+        with self.lock:
+            if self.fault:
+                return
+            self.fault = {"code": code, "message": message,
+                          "timestamp": time.time(), "step": self.status_msg,
+                          "recovery": "Resolve cause, wait for motion to stop, then recover. Interrupted programs restart; they do not resume."}
+            self.events.append(dict(self.fault))
+            self.events[:] = self.events[-100:]
+            self.abort_requested = True
+            self.status_msg = message
+            logging.getLogger(__name__).warning("Workcell fault %s: %s", code, message)
+
+    def inject_fault(self, code):
+        with self.lock:
+            if self.mode != "SIMULATION":
+                raise ValueError("Fault injection is available only in simulation")
+            if code not in {"FEEDER_EMPTY", "SENSOR_TIMEOUT", "MOTION_TIMEOUT", "CONNECTION_LOST"}:
+                raise ValueError("Unknown fault code")
+            if code == "FEEDER_EMPTY":
+                self.mag_sensor = False
+            self.raise_fault(code, f"Simulated {code.replace('_', ' ').lower()}")
+
+    def _dwell(self, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self.abort_requested or self.stop_active:
+                return False
+            time.sleep(min(0.02, max(0, deadline - time.monotonic())))
+        return True
+
+    def _launch_program(self, worker):
+        with self.lock:
+            if (self.sequence_running or self.is_moving or self.stop_active or self.fault
+                    or (self.active_thread and self.active_thread.is_alive())):
+                self.status_msg = "Program rejected: cell is busy or requires recovery"
+                return False
+            if self.mode == "DISCONNECTED" or self.abort_requested:
+                self.status_msg = "Program rejected: reconnect or recover first"
+                return False
+            self.sequence_running = True
+            command = {"command_id": str(uuid.uuid4()), "status": "accepted",
+                       "success": True, "submitted_at": time.time()}
+            self.commands.append(command)
+            self.commands[:] = self.commands[-100:]
+            response = dict(command)
+
+            def run():
+                with self.lock:
+                    command.update(status="running", started_at=time.time())
+                try:
+                    outcome = worker()
+                    if outcome is False and not (self.fault or self.stop_active or self.abort_requested):
+                        self.raise_fault("PROGRAM_FAILED", "Program did not complete")
+                except Exception:
+                    logging.getLogger(__name__).exception("Program failed")
+                    self.raise_fault("PROGRAM_FAILED", "Unexpected program failure; inspect server log")
+                finally:
+                    with self.lock:
+                        status = "failed" if self.fault else "cancelled" if self.abort_requested or self.stop_active else "completed"
+                        command.update(status=status, success=status == "completed",
+                                       finished_at=time.time(), message=self.status_msg)
+                        self.sequence_running = False
+                        self.is_moving = False
+                        self.active_program_name = "Idle"
+                        self.motion_phase = "IDLE"
+
+            self.active_thread = threading.Thread(target=run, daemon=True)
+            self.active_thread.start()
+            return response
 
     def _init_slots(self) -> List[Dict]:
         from .kinematics import get_approach_pose
@@ -377,10 +484,10 @@ class PalletizerEngine:
                         # Physical PLC push button rising edge triggers
                         if self.pb1 and not prev_pb1:
                             if not self.sequence_running and not self.is_moving:
-                                threading.Thread(target=self.trigger_pb1_palletize, daemon=True).start()
+                                self.command_service.execute("pb1") if self.command_service else self.trigger_pb1_palletize()
                         if self.pb2 and not prev_pb2:
                             if not self.sequence_running and not self.is_moving:
-                                threading.Thread(target=self.trigger_pb2_put_back, daemon=True).start()
+                                self.command_service.execute("pb2") if self.command_service else self.trigger_pb2_put_back()
                         if self.stop_active and not prev_stop:
                             self.set_stop(True)
 
@@ -409,7 +516,8 @@ class PalletizerEngine:
                         self.indy = None
                         if self.mode == "HARDWARE_LIVE":
                             self.mode = "DISCONNECTED"
-                        self.status_msg = f"Lost connection to Indy7: {e}"
+                        self.auto_reconnect = False
+                        self.raise_fault("CONNECTION_LOST", f"Lost connection to Indy7: {e}")
 
             time.sleep(0.033)
 
@@ -474,15 +582,16 @@ class PalletizerEngine:
                     self.status_msg = f"Jog {ax.upper()} Error: {e}"
                     return False
             else:
-                # Simulation Cartesian jog
-                self.p[idx] = round(self.p[idx] + step_val, 2)
-                unit = "mm" if idx < 3 else "°"
-                self.status_msg = f"[SIM] Jog {ax.upper()} -> {self.p[idx]}{unit}"
-                return True
+                target = list(self.p)
+                target[idx] += step_val
+                return self._launch_program(lambda: self._sim_cartesian_move(
+                    target, 0.3, f"[SIM] Jog {ax.upper()}: {step_val:+.1f}"))
 
     def stop_jog(self):
         """Immediately halts jogging."""
         with self.lock:
+            if self.mode == "SIMULATION" and self.sequence_running:
+                self.abort_requested = True
             if self.hardware_connected and self.indy:
                 try:
                     self.indy.stop_motion(StopCategory.CAT0)
@@ -539,58 +648,32 @@ class PalletizerEngine:
     # MULTI-PURPOSE PROGRAMS (HOME, ZERO, RECOVER, WAYPOINTS)
     # =========================================================================
     def move_home(self):
-        def worker():
-            with self.lock:
-                self.sequence_running = True
-                self.active_program_name = "Move Home"
-            if self.hardware_connected and self.indy:
-                try:
-                    self.status_msg = "Moving to Home Position..."
-                    self.indy.move_home()
-                    self._wait_hardware_motion()
-                    self.status_msg = "Reached Home Position"
-                except Exception as e:
-                    self.status_msg = f"Move Home Error: {e}"
-            else:
-                self._sim_move(HOME_JPOS, 1.4, "Returning to Home Position")
-
-            with self.lock:
-                self.sequence_running = False
-                self.active_program_name = "Idle"
-
-        threading.Thread(target=worker, daemon=True).start()
+        return self._launch_program(self._execute_move_home)
 
     def move_zero(self):
-        def worker():
-            with self.lock:
-                self.sequence_running = True
-                self.active_program_name = "Move Zero"
-            zero_q = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-            if self.hardware_connected and self.indy:
-                try:
-                    self.status_msg = "Moving to Zero Position..."
-                    self.indy.movej(zero_q, vel_ratio=20, acc_ratio=20)
-                    self._wait_hardware_motion()
-                    self.status_msg = "Reached Zero Position"
-                except Exception as e:
-                    self.status_msg = f"Move Zero Error: {e}"
-            else:
-                self._sim_move(zero_q, 1.6, "Moving to Calibration Zero Position")
-
-            with self.lock:
-                self.sequence_running = False
-                self.active_program_name = "Idle"
-
-        threading.Thread(target=worker, daemon=True).start()
+        return self._launch_program(lambda: self._execute_joint_move([0.0] * 6, 20, "Moving to Zero"))
 
     def recover_robot(self) -> bool:
-        """Clears faults, violations, and emergency stop latch."""
+        """Acknowledge a resolved fault; never resume an interrupted sequence."""
         with self.lock:
+            if self.sequence_running or self.is_moving or (self.active_thread and self.active_thread.is_alive()):
+                self.status_msg = "Wait for the active program to finish stopping"
+                return False
+            if self.held_workpiece:
+                self.status_msg = "Reconcile the held workpiece before recovery (reset the simulated cell)"
+                return False
+            if self.fault and self.fault["code"] == "FEEDER_EMPTY" and not self.mag_sensor:
+                self.status_msg = "Restore feeder sensor before recovery"
+                return False
+            if self.mode == "DISCONNECTED":
+                self.status_msg = "Reconnect equipment before recovery"
+                return False
             if self.hardware_connected and self.indy:
                 try:
                     self.indy.recover()
                     self.stop_active = False
                     self.abort_requested = False
+                    self.fault = None
                     self.status_msg = "Robot Recovered & Fault Cleared"
                     return True
                 except Exception as e:
@@ -599,146 +682,66 @@ class PalletizerEngine:
             else:
                 self.stop_active = False
                 self.abort_requested = False
+                self.fault = None
+                self.op_state = 5
+                self.op_state_name = "OP_IDLE (5)"
                 self.status_msg = "[SIM] System Reset / Ready"
                 return True
 
-    def move_to_waypoint(self, wp_id: str):
-        """Commands robot to navigate directly to a specified waypoint."""
-        wp = next((w for w in self.waypoints if w["id"] == wp_id), None)
-        if not wp:
-            self.status_msg = f"Waypoint '{wp_id}' not found"
-            return
+    def move_to_waypoint(self, wp_id):
+        from copy import deepcopy
+        waypoint = next((deepcopy(w) for w in self.waypoints if w["id"] == wp_id), None)
+        if waypoint is None:
+            self.status_msg = "Waypoint not found"
+            return False
+        return self._launch_program(lambda: self._execute_waypoint(waypoint))
 
-        def worker():
-            with self.lock:
-                self.sequence_running = True
-                self.active_program_name = f"GoTo: {wp['name']}"
+    def _execute_waypoint(self, waypoint):
+        if self.abort_requested or self.stop_active:
+            return False
+        name = waypoint.get("name", "Waypoint")
+        speed = waypoint.get("speed", 25)
+        self.active_program_name = name
+        if waypoint.get("move_type") == "MoveL" and waypoint.get("p"):
+            success = self._execute_cartesian_move(waypoint["p"], speed, speed, name)
+        else:
+            success = self._execute_joint_move(waypoint.get("q", HOME_JPOS), speed, name)
+        if not success or self.abort_requested or self.stop_active:
+            return False
+        action = waypoint.get("gripper", "keep")
+        if action in ("open", "close") and not self.set_gripper(action == "close"):
+            return False
+        return self._dwell(waypoint.get("dwell", 0))
 
-            target_q = wp.get("q", HOME_JPOS)
-            target_p = wp.get("p")
-            move_type = wp.get("move_type", "MoveJ")
-            speed = wp.get("speed", 25)
-
-            if self.hardware_connected and self.indy:
-                try:
-                    self.status_msg = f"Moving to '{wp['name']}' ({move_type})..."
-                    if move_type == "MoveL" and target_p:
-                        self.indy.movel(target_p, vel_ratio=speed, acc_ratio=speed)
-                    else:
-                        self.indy.movej(target_q, vel_ratio=speed, acc_ratio=speed)
-                    self._wait_hardware_motion()
-                    
-                    # Tool action
-                    grip_act = wp.get("gripper", "keep")
-                    if grip_act == "open":
-                        self.set_gripper(False)
-                    elif grip_act == "close":
-                        self.set_gripper(True)
-
-                    dwell = wp.get("dwell", 0.0)
-                    if dwell > 0:
-                        time.sleep(dwell)
-
-                    self.status_msg = f"Reached '{wp['name']}'"
-                except Exception as e:
-                    self.status_msg = f"Move Error: {e}"
-            else:
-                # Simulation move
-                self._sim_move(target_q, 1.2, f"Moving to '{wp['name']}'")
-                grip_act = wp.get("gripper", "keep")
-                if grip_act == "open":
-                    self.set_gripper(False)
-                elif grip_act == "close":
-                    self.set_gripper(True)
-                dwell = wp.get("dwell", 0.0)
-                if dwell > 0:
-                    time.sleep(dwell)
-
-            with self.lock:
-                self.sequence_running = False
-                self.active_program_name = "Idle"
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def start_waypoint_sequence(self, repeat_count: int = 1):
-        """Executes all saved waypoints in sequence."""
-        if not self.waypoints:
-            self.status_msg = "No waypoints saved to execute!"
-            return
+    def start_waypoint_sequence(self, repeat_count=1):
+        from copy import deepcopy
+        waypoints = deepcopy(self.waypoints)
+        if not waypoints:
+            self.status_msg = "No waypoints saved to execute"
+            return False
 
         def worker():
             self.cycle_start_time = time.time()
-            with self.lock:
-                self.sequence_running = True
-                self.abort_requested = False
-                self.total_steps = len(self.waypoints) * max(1, repeat_count)
-                self.current_step_idx = 0
-
-            cycles = range(repeat_count) if repeat_count > 0 else iter(int, 1) # 0 = infinite
-
-            for cycle in cycles:
-                if self.abort_requested or self.stop_active:
-                    break
-
-                for i, wp in enumerate(self.waypoints):
-                    if self.abort_requested or self.stop_active:
-                        break
-
-                    with self.lock:
-                        self.current_step_idx += 1
-                        self.active_program_name = f"Seq [{cycle+1}] {wp['name']}"
-
-                    target_q = wp.get("q", HOME_JPOS)
-                    target_p = wp.get("p")
-                    move_type = wp.get("move_type", "MoveJ")
-                    speed = wp.get("speed", 25)
-
-                    if self.hardware_connected and self.indy:
-                        try:
-                            self.status_msg = f"Step {self.current_step_idx}: '{wp['name']}'"
-                            if move_type == "MoveL" and target_p:
-                                self.indy.movel(target_p, vel_ratio=speed, acc_ratio=speed)
-                            else:
-                                self.indy.movej(target_q, vel_ratio=speed, acc_ratio=speed)
-                            self._wait_hardware_motion()
-
-                            grip_act = wp.get("gripper", "keep")
-                            if grip_act == "open":
-                                self.set_gripper(False)
-                            elif grip_act == "close":
-                                self.set_gripper(True)
-
-                            dwell = wp.get("dwell", 0.0)
-                            if dwell > 0:
-                                time.sleep(dwell)
-                        except Exception as e:
-                            self.status_msg = f"Sequence Error: {e}"
-                            break
-                    else:
-                        if not self._sim_move(target_q, 1.2, f"Step {self.current_step_idx}: '{wp['name']}'"):
-                            break
-                        grip_act = wp.get("gripper", "keep")
-                        if grip_act == "open":
-                            self.set_gripper(False)
-                        elif grip_act == "close":
-                            self.set_gripper(True)
-                        dwell = wp.get("dwell", 0.0)
-                        if dwell > 0:
-                            time.sleep(dwell)
-
+            self.total_steps = len(waypoints) * repeat_count
+            self.current_step_idx = 0
+            cycle = 0
+            while repeat_count == 0 or cycle < repeat_count:
+                for waypoint in waypoints:
+                    self.current_step_idx += 1
+                    if not self._execute_waypoint(waypoint):
+                        return False
+                cycle += 1
             self.last_cycle_tact = round(time.time() - self.cycle_start_time, 2)
-            with self.lock:
-                self.sequence_running = False
-                self.active_program_name = "Idle"
-                self.status_msg = f"Sequence Finished! Tact: {self.last_cycle_tact}s"
+            self.status_msg = f"Sequence finished in {self.last_cycle_tact}s"
+            return True
 
-        self.active_thread = threading.Thread(target=worker, daemon=True)
-        self.active_thread.start()
+        return self._launch_program(worker)
 
     def _wait_hardware_motion(self, timeout: float = 30.0) -> bool:
         """Polls until physical robot has finished moving using 2-phase verification."""
         if not self.indy:
-            return True
+            self.raise_fault("CONNECTION_LOST", "Robot connection unavailable")
+            return False
         start_time = time.time()
 
         # Phase 1: Wait for motion to register and start (up to 0.5s)
@@ -772,7 +775,7 @@ class PalletizerEngine:
                 op_state = r_data.get("op_state", 5)
 
                 if op_state in [2, 3, 4, 8, 9, 15]:
-                    self.status_msg = f"Safety stop triggered! OpState={op_state}"
+                    self.raise_fault("ROBOT_STOP", f"Robot stop reported: OpState={op_state}")
                     return False
 
                 if not is_in_motion and op_state == 5:
@@ -781,6 +784,7 @@ class PalletizerEngine:
                 pass
             time.sleep(0.04)
 
+        self.raise_fault("MOTION_TIMEOUT", "Robot motion did not complete before timeout")
         return False
 
     def get_pallet_slot_pose(self, index: int) -> List[float]:
@@ -835,181 +839,81 @@ class PalletizerEngine:
             target_pose[5],
         ]
 
-    def _execute_cartesian_move(self, pose: List[float], vel_ratio: Optional[int] = None, acc_ratio: Optional[int] = None, step_name: str = "") -> bool:
-        """Executes a Cartesian straight-line linear move (MoveL) collinear with tool angle."""
-        if step_name:
-            self.status_msg = step_name
-        self.is_moving = True
-        self.op_state = 6
-        self.op_state_name = "OP_MOVING (6)"
+    def _execute_cartesian_move(self, pose, vel_ratio=None, acc_ratio=None, step_name=""):
+        return self._driver_motion("move_cartesian", pose, vel_ratio or self.speed_ratio,
+                                   acc_ratio or self.speed_ratio, step_name)
 
-        vel = vel_ratio or self.speed_ratio
-        acc = acc_ratio or self.speed_ratio
+    def _execute_move_home(self):
+        return self._driver_motion("home")
 
-        if self.hardware_connected and self.indy:
-            try:
-                with self.lock:
-                    self.indy.movel(
-                        ttarget=list(pose),
-                        base_type=TaskBaseType.ABSOLUTE,
-                        vel_ratio=vel,
-                        acc_ratio=acc,
-                    )
-                success = self._wait_hardware_motion()
-                self.is_moving = False
-                return success
-            except Exception as e:
-                self.status_msg = f"Hardware MoveL Error: {e}"
-                self.is_moving = False
-                return False
+    def _driver_motion(self, operation, *args):
+        if self.abort_requested or self.stop_active or self.fault:
+            return False
+        if self.mode == "SIMULATION":
+            driver = self.simulation_driver
+        elif self.hardware_connected and self.indy:
+            driver = HardwareDriver(self, TaskBaseType.ABSOLUTE)
         else:
-            return self._sim_cartesian_move(pose, 1.2, step_name)
-
-    def _execute_move_home(self) -> bool:
-        """Executes calibrated Move Home matching palletizing_with_plc.py."""
-        self.status_msg = "Returning to HOME position..."
+            self.raise_fault("CONNECTION_LOST", "Robot connection unavailable")
+            return False
         self.is_moving = True
-        self.op_state = 6
-        self.op_state_name = "OP_MOVING (6)"
-
-        if self.hardware_connected and self.indy:
-            try:
-                with self.lock:
-                    self.indy.move_home()
-                success = self._wait_hardware_motion()
-                self.is_moving = False
-                return success
-            except Exception as e:
-                self.status_msg = f"Move Home Error: {e}"
-                self.is_moving = False
-                return False
-        else:
-            return self._sim_move(HOME_JPOS, 1.5, "Returning to HOME Position")
-
-    def _execute_joint_move(self, q_target: List[float], vel_ratio: Optional[int] = None, step_name: str = "") -> bool:
-        """Executes a joint move on physical hardware if connected, or runs 3D simulation."""
-        if step_name:
-            self.status_msg = step_name
-        self.is_moving = True
-        self.op_state = 6
-        self.op_state_name = "OP_MOVING (6)"
-
-        vel = vel_ratio or self.speed_ratio
-
-        if self.hardware_connected and self.indy:
-            try:
-                with self.lock:
-                    self.indy.movej(list(q_target), vel_ratio=vel, acc_ratio=vel)
-                
-                success = self._wait_hardware_motion()
-                self.is_moving = False
-                return success
-            except Exception as e:
-                self.status_msg = f"Hardware Motion Error: {e}"
-                self.is_moving = False
-                return False
-        else:
-            return self._sim_move(q_target, 1.2, step_name)
-
-    def _sim_cartesian_move(self, p_target: List[float], duration: float, step_name: str) -> bool:
-        self.status_msg = step_name
-        self.is_moving = True
-        self.op_state = 6
-        self.op_state_name = "OP_MOVING (6)"
-
-        steps = max(int(duration * 60), 2)
-        p_start = np.array(self.p, dtype=float)
-        p_end = np.array(p_target, dtype=float)
-
-        for step in range(steps):
-            if self.abort_requested or self.stop_active:
-                self.is_moving = False
-                self.op_state = 8
-                self.op_state_name = "OP_STOP (X107)"
-                return False
-
-            tau = step / (steps - 1)
-            s = 10.0 * (tau ** 3) - 15.0 * (tau ** 4) + 6.0 * (tau ** 5)
-            cur_p = p_start + s * (p_end - p_start)
-            with self.lock:
-                self.p = [round(float(v), 2) for v in cur_p]
-            time.sleep(1.0 / 60.0)
-
-        with self.lock:
-            self.p = list(p_target)
+        try:
+            result = getattr(driver, operation)(*args)
+            if not result and not (self.fault or self.abort_requested or self.stop_active):
+                self.raise_fault("MOTION_FAILED", f"{operation} did not complete")
+            return result
+        except Exception:
+            logging.getLogger(__name__).exception("Motion failed: %s", operation)
+            self.raise_fault("MOTION_FAILED", f"{operation} failed; inspect server log")
+            return False
+        finally:
             self.is_moving = False
-            self.op_state = 5
-            self.op_state_name = "OP_IDLE (5)"
-        return True
+
+    def _execute_joint_move(self, q_target, vel_ratio=None, step_name=""):
+        return self._driver_motion("move_joint", q_target, vel_ratio or self.speed_ratio, step_name)
+
+    def _sim_cartesian_move(self, p_target, duration, step_name):
+        return self.simulation_driver._sim_cartesian_move(p_target, duration, step_name)
 
     def set_stop(self, active: bool = True):
         with self.lock:
             self.stop_active = active
             if active:
                 self.abort_requested = True
-                self.status_msg = "EMERGENCY STOP TRIGGERED!"
+                self.status_msg = "Application stop requested"
                 if self.hardware_connected and self.indy:
                     try:
                         self.indy.stop_motion(StopCategory.CAT2)
                     except Exception:
                         pass
             else:
-                self.abort_requested = False
-                self.status_msg = "Stop Cleared / Ready"
+                self.status_msg = "Stop released; use Recover before restarting"
 
     def trigger_pb1_palletize(self):
         with self.lock:
-            if self.is_moving or self.sequence_running:
-                return
+            if self.is_moving or self.sequence_running or self.stop_active or self.fault:
+                return False
             if self.pallet_count >= TOTAL_MAX_ITEMS:
                 self.status_msg = "Pallet is already full (8/8)!"
-                return
+                return False
             if self.magazine_count <= 0 or not self.mag_sensor:
-                self.status_msg = "Magazine is empty! Cannot pick."
-                return
+                self.raise_fault("FEEDER_EMPTY", "Magazine is empty! Cannot pick.")
+                return False
 
-            self.abort_requested = False
-            self.active_thread = threading.Thread(target=self._run_palletize_sequence, daemon=True)
-            self.active_thread.start()
+            return self._launch_program(self._run_palletize_sequence)
 
     def trigger_pb2_put_back(self):
         with self.lock:
-            if self.is_moving or self.sequence_running:
-                return
+            if self.is_moving or self.sequence_running or self.stop_active or self.fault:
+                return False
             if self.pallet_count <= 0:
                 self.status_msg = "Pallet is empty! Nothing to put back."
-                return
-
-            self.abort_requested = False
-            self.active_thread = threading.Thread(target=self._run_put_back_sequence, daemon=True)
-            self.active_thread.start()
-
-    def _sim_move(self, q_target: List[float], duration: float, step_name: str) -> bool:
-        self.status_msg = step_name
-        self.is_moving = True
-        self.op_state = 6
-        self.op_state_name = "OP_MOVING (6)"
-
-        traj = quintic_interpolate(self.q, q_target, duration, hz=60)
-        for point in traj:
-            if self.abort_requested or self.stop_active:
-                self.is_moving = False
-                self.op_state = 8
-                self.op_state_name = "OP_STOP (X107)"
                 return False
 
-            with self.lock:
-                self.q = point
-                self.p = forward_kinematics_craig(self.q)
-            time.sleep(1.0 / 60.0)
+            return self._launch_program(self._run_put_back_sequence)
 
-        with self.lock:
-            self.q = list(q_target)
-            self.p = forward_kinematics_craig(self.q)
-            self.is_moving = False
-            self.op_state = 5
-            self.op_state_name = "OP_IDLE (5)"
-        return True
+    def _sim_move(self, q_target, duration, step_name):
+        return self.simulation_driver._sim_move(q_target, duration, step_name)
 
     def _run_palletize_sequence(self):
         """Executes exact single-pallet 8-slot palletizing loop using MoveL matching palletizing_with_plc.py."""
@@ -1026,7 +930,7 @@ class PalletizerEngine:
             if self.abort_requested or self.stop_active:
                 break
             if self.magazine_count <= 0 or not self.mag_sensor:
-                self.status_msg = f"Magazine Sensor OFF (Empty). Placed {self.pallet_count}/8 items."
+                self.raise_fault("FEEDER_EMPTY", f"Feeder empty after {self.pallet_count} items")
                 break
 
             slot_pose = self.get_pallet_slot_pose(i)
@@ -1038,10 +942,11 @@ class PalletizerEngine:
             # -------------------------------------------------------------
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Approach (Tilt: {PICK_LOCATION[3]}°)"}
-            self.set_gripper(False)
+            if not self.set_gripper(False):
+                return False
             if not self._execute_cartesian_move(pick_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
                                                step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 2: Feeder Pick Plunge (MoveL Collinear along -19.52° Angle)
@@ -1050,15 +955,18 @@ class PalletizerEngine:
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Plunge (Collinear @ {PICK_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(PICK_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 3: Grip Billet
             # -------------------------------------------------------------
             self.motion_phase = "GRIP"
             self.status_msg = f"[Item {i+1}] Gripping Billet (DO1=ON)"
-            self.set_gripper(True)
-            time.sleep(GRIPPER_DWELL_SEC)
+            if not self.set_gripper(True):
+                return False
+            self._dwell(GRIPPER_DWELL_SEC)
+            if self.abort_requested or self.stop_active:
+                break
             self.held_workpiece = True
             self.magazine_count = max(0, self.magazine_count - 1)
             if self.magazine_count == 0:
@@ -1071,7 +979,7 @@ class PalletizerEngine:
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Extract MoveL (Collinear @ {PICK_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(pick_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 5: Pallet Slot Place Approach (MoveL with -3.24° Tool Angle)
@@ -1080,7 +988,7 @@ class PalletizerEngine:
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Approach (Floor {floor}) @ {slot_pose[3]}°"}
             if not self._execute_cartesian_move(drop_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
                                                step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 6: Pallet Slot Place Plunge (MoveL Lower into Slot)
@@ -1089,15 +997,18 @@ class PalletizerEngine:
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Place Plunge (Z={slot_pose[2]}mm)"}
             if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 7: Release Billet
             # -------------------------------------------------------------
             self.motion_phase = "RELEASE"
             self.status_msg = f"[Item {i+1}] Releasing into Slot {i+1} (DO0=ON)"
-            self.set_gripper(False)
-            time.sleep(GRIPPER_DWELL_SEC)
+            if not self.set_gripper(False):
+                return False
+            self._dwell(GRIPPER_DWELL_SEC)
+            if self.abort_requested or self.stop_active:
+                break
             self.held_workpiece = False
             self.slots[i]["placed"] = True
             self.pallet_count += 1
@@ -1113,7 +1024,8 @@ class PalletizerEngine:
 
         if not self.abort_requested and not self.stop_active:
             self.motion_phase = "IDLE"
-            self._execute_move_home()
+            if not self._execute_move_home():
+                return False
             self.last_cycle_tact = round(time.time() - self.cycle_start_time, 2)
             self.status_msg = f"Palletizing Completed! Placed: {self.pallet_count}/8 | Tact: {self.last_cycle_tact}s"
 
@@ -1145,10 +1057,11 @@ class PalletizerEngine:
             # -------------------------------------------------------------
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Return Approach (Floor {floor})"}
-            self.set_gripper(False)
+            if not self.set_gripper(False):
+                return False
             if not self._execute_cartesian_move(slot_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
                                                step_name=f"[Return {i+1}] Slot {i+1} Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 2: Pallet Slot Pick Plunge (MoveL Grasp Height)
@@ -1157,15 +1070,18 @@ class PalletizerEngine:
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Plunge to Grasp (Z={slot_pose[2]}mm)"}
             if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Return {i+1}] Plunging to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 3: Grip Billet
             # -------------------------------------------------------------
             self.motion_phase = "GRIP"
             self.status_msg = f"[Return {i+1}] Gripping Billet (DO1=ON)"
-            self.set_gripper(True)
-            time.sleep(GRIPPER_DWELL_SEC)
+            if not self.set_gripper(True):
+                return False
+            self._dwell(GRIPPER_DWELL_SEC)
+            if self.abort_requested or self.stop_active:
+                break
             self.held_workpiece = True
             self.slots[i]["placed"] = False
             self.pallet_count -= 1
@@ -1177,7 +1093,7 @@ class PalletizerEngine:
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL"}
             if not self._execute_cartesian_move(slot_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Return {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 5: Feeder Top Insert Approach (MoveL to Feeder Top Clearance)
@@ -1186,7 +1102,7 @@ class PalletizerEngine:
             self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Top Approach @ {MAGAZINE_INSERT_LOCATION[3]}°"}
             if not self._execute_cartesian_move(mag_insert_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
                                                step_name=f"[Return {i+1}] Feeder Top Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 6: Feeder Top Insert Plunge (MoveL Collinear Insert)
@@ -1195,15 +1111,18 @@ class PalletizerEngine:
             self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Insert Plunge (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"}
             if not self._execute_cartesian_move(MAGAZINE_INSERT_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
                                                step_name=f"[Return {i+1}] Inserting into Feeder MoveL (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
-                break
+                return False
 
             # -------------------------------------------------------------
             # STEP 7: Release Billet
             # -------------------------------------------------------------
             self.motion_phase = "RELEASE"
             self.status_msg = f"[Return {i+1}] Releasing into Feeder (DO0=ON)"
-            self.set_gripper(False)
-            time.sleep(GRIPPER_DWELL_SEC)
+            if not self.set_gripper(False):
+                return False
+            self._dwell(GRIPPER_DWELL_SEC)
+            if self.abort_requested or self.stop_active:
+                break
             self.held_workpiece = False
             self.magazine_count = min(8, self.magazine_count + 1)
             self.mag_sensor = True
@@ -1219,7 +1138,8 @@ class PalletizerEngine:
 
         if not self.abort_requested and not self.stop_active:
             self.motion_phase = "IDLE"
-            self._execute_move_home()
+            if not self._execute_move_home():
+                return False
             self.last_cycle_tact = round(time.time() - self.cycle_start_time, 2)
             self.status_msg = f"Put-Back Finished! Pallet: {self.pallet_count}/8 | Tact: {self.last_cycle_tact}s"
 
@@ -1232,6 +1152,10 @@ class PalletizerEngine:
         with self.lock:
             return {
                 "mode": self.mode,
+                "workcell_state": self.workcell_state,
+                "fault": self.fault,
+                "recent_events": list(self.events[-10:]),
+                "last_command": dict(self.commands[-1]) if self.commands else None,
                 "robot_ip": self.robot_ip,
                 "hardware_connected": self.hardware_connected,
                 "q": [round(x, 2) for x in self.q],

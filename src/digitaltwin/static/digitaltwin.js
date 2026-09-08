@@ -744,6 +744,11 @@
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.type === "command_result") {
+          window.dispatchEvent(new CustomEvent("workcell-command", { detail: data }));
+          return;
+        }
+        window.dispatchEvent(new CustomEvent("workcell-telemetry", { detail: data }));
         handleTelemetry(data);
       } catch (e) {}
     };
@@ -807,10 +812,12 @@
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ cmd, ...payload }));
     } else {
-      fetch(`/api/${cmd}`, {
+      fetch("/api/commands", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ cmd, ...payload })
+      }).then(r => r.json()).then(detail => {
+        window.dispatchEvent(new CustomEvent("workcell-command", { detail }));
       });
     }
   }
@@ -1144,7 +1151,6 @@
     const btnReconnect = document.getElementById("btnReconnect");
     if (btnReconnect) {
       btnReconnect.addEventListener("click", () => {
-        fetch("/api/reconnect", { method: "POST" });
         sendCmd("reconnect");
       });
     }
@@ -1152,7 +1158,6 @@
     const btnOverlayReconnect = document.getElementById("btnOverlayReconnect");
     if (btnOverlayReconnect) {
       btnOverlayReconnect.addEventListener("click", () => {
-        fetch("/api/reconnect", { method: "POST" });
         sendCmd("reconnect");
       });
     }
@@ -1160,7 +1165,6 @@
     const btnOverlaySim = document.getElementById("btnOverlaySim");
     if (btnOverlaySim) {
       btnOverlaySim.addEventListener("click", () => {
-        fetch("/api/simulation", { method: "POST" });
         sendCmd("simulation");
       });
     }
@@ -1169,9 +1173,9 @@
     if (btnMode) {
       btnMode.addEventListener("click", () => {
         if (currentMode === "HARDWARE_LIVE") {
-          fetch("/api/simulation", { method: "POST" });
+          sendCmd("simulation");
         } else {
-          fetch("/api/reconnect", { method: "POST" });
+          sendCmd("reconnect");
         }
       });
     }
@@ -1281,7 +1285,7 @@
       opText.textContent = "OFFLINE (NO TELEMETRY)";
     } else if (data.plc_io && data.plc_io.stop) {
       badge.classList.add("badge-stop");
-      opText.textContent = "EMERGENCY STOP";
+      opText.textContent = "APPLICATION STOP";
     } else if (data.is_moving) {
       badge.classList.add("badge-moving");
       opText.textContent = data.op_state_name || "OP_MOVING (6)";

@@ -505,16 +505,59 @@ class ProductionStorage:
             """, (limit,))
             return [dict(r) for r in cur.fetchall()]
 
+    def get_state_timeline(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Returns chronological state transitions with calculated durations for timeline rendering."""
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("""
+                SELECT transition_id, from_state, to_state, trigger, timestamp, run_id
+                FROM state_transitions
+                ORDER BY timestamp DESC
+                LIMIT ?;
+            """, (limit,))
+            rows = [dict(r) for r in cur.fetchall()]
+
+        # Reverse so earliest transition is first
+        rows.reverse()
+        now_dt = datetime.now(timezone.utc)
+
+        for i, item in enumerate(rows):
+            try:
+                cur_dt = datetime.fromisoformat(item["timestamp"])
+                if i + 1 < len(rows):
+                    next_dt = datetime.fromisoformat(rows[i + 1]["timestamp"])
+                    duration = max(0.0, (next_dt - cur_dt).total_seconds())
+                else:
+                    duration = max(0.0, (now_dt - cur_dt).total_seconds())
+                item["duration_seconds"] = round(duration, 2)
+            except Exception:
+                item["duration_seconds"] = 0.0
+
+        return rows
+
     def calculate_kpi_summary(self) -> Dict[str, Any]:
-        """Calculates production performance KPIs (throughput, cycle stats, step breakdown, downtime)."""
+        """Calculates comprehensive production performance KPIs (throughput, cycle stats, step breakdown, downtime)."""
         with self._lock:
             cur = self._conn.cursor()
 
-            # Total & completed runs
-            cur.execute("SELECT COUNT(*), SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) FROM production_runs;")
-            r_total, r_completed = cur.fetchone()
-            r_total = r_total or 0
-            r_completed = r_completed or 0
+            # Total & completed runs, plus active production duration
+            cur.execute("""
+                SELECT
+                    COUNT(*),
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END),
+                    SUM(COALESCE(duration_seconds, 0.0))
+                FROM production_runs;
+            """)
+            r_row = cur.fetchone()
+            r_total = r_row[0] or 0
+            r_completed = r_row[1] or 0
+            r_failed = r_row[2] or 0
+            r_interrupted = r_row[3] or 0
+            r_cancelled = r_row[4] or 0
+            active_prod_sec = round(float(r_row[5] or 0.0), 2)
 
             # Total parts placed
             cur.execute("SELECT SUM(completed_count) FROM production_runs;")
@@ -529,6 +572,8 @@ class ProductionStorage:
             """)
             cycle_durs = [row[0] for row in cur.fetchall()]
             avg_cycle = round(sum(cycle_durs) / len(cycle_durs), 2) if cycle_durs else 0.0
+            min_cycle = round(cycle_durs[0], 2) if cycle_durs else 0.0
+            max_cycle = round(cycle_durs[-1], 2) if cycle_durs else 0.0
 
             if cycle_durs:
                 # 95th percentile
@@ -537,38 +582,116 @@ class ProductionStorage:
             else:
                 p95_cycle = 0.0
 
+            # Throughput calculation
+            if active_prod_sec > 0 and total_parts > 0:
+                throughput_per_hour = round((total_parts / active_prod_sec) * 3600.0, 1)
+            elif avg_cycle > 0:
+                throughput_per_hour = round(3600.0 / avg_cycle, 1)
+            else:
+                throughput_per_hour = 0.0
+
+            throughput_per_min = round(throughput_per_hour / 60.0, 2)
+
             # Step-time breakdown (average per step name)
             cur.execute("""
-                SELECT step_name, AVG(duration_seconds), COUNT(*)
+                SELECT step_name, AVG(duration_seconds), COUNT(*), MIN(duration_seconds), MAX(duration_seconds)
                 FROM process_steps
                 WHERE status = 'completed' AND duration_seconds IS NOT NULL
                 GROUP BY step_name
                 ORDER BY AVG(duration_seconds) DESC;
             """)
-            step_breakdown = {
-                row[0]: {"avg_duration_sec": round(row[1], 3), "count": row[2]}
-                for row in cur.fetchall()
-            }
+            step_rows = cur.fetchall()
+            total_step_time = sum(float(r[1] or 0.0) for r in step_rows)
 
-            # Fault counts & Pareto
-            cur.execute("""
-                SELECT code, COUNT(*) FROM fault_events
-                GROUP BY code
-                ORDER BY COUNT(*) DESC;
-            """)
-            fault_pareto = {row[0]: row[1] for row in cur.fetchall()}
-            total_faults = sum(fault_pareto.values())
+            step_breakdown = {}
+            bottleneck_step = None
+            max_step_dur = -1.0
+
+            for row in step_rows:
+                s_name = row[0]
+                s_avg = round(float(row[1] or 0.0), 3)
+                s_count = row[2]
+                s_min = round(float(row[3] or 0.0), 3)
+                s_max = round(float(row[4] or 0.0), 3)
+                s_pct = round((s_avg / total_step_time) * 100.0, 1) if total_step_time > 0 else 0.0
+
+                step_breakdown[s_name] = {
+                    "avg_duration_sec": s_avg,
+                    "min_duration_sec": s_min,
+                    "max_duration_sec": s_max,
+                    "count": s_count,
+                    "pct_of_cycle": s_pct,
+                }
+                if s_avg > max_step_dur:
+                    max_step_dur = s_avg
+                    bottleneck_step = s_name
+
+            # Fault counts, downtime & Pareto
+            cur.execute("SELECT code, timestamp, resolved_at FROM fault_events;")
+            fault_rows = cur.fetchall()
+            now_dt = datetime.now(timezone.utc)
+
+            total_downtime_sec = 0.0
+            fault_counts: Dict[str, int] = {}
+            fault_downtimes: Dict[str, float] = {}
+
+            for fcode, fts, fres in fault_rows:
+                fault_counts[fcode] = fault_counts.get(fcode, 0) + 1
+                try:
+                    start_d = datetime.fromisoformat(fts)
+                    end_d = datetime.fromisoformat(fres) if fres else now_dt
+                    dt_sec = max(0.0, (end_d - start_d).total_seconds())
+                except Exception:
+                    dt_sec = 0.0
+                total_downtime_sec += dt_sec
+                fault_downtimes[fcode] = fault_downtimes.get(fcode, 0.0) + dt_sec
+
+            total_downtime_sec = round(total_downtime_sec, 2)
+            total_faults = len(fault_rows)
+
+            # Sort fault pareto by count descending
+            sorted_codes = sorted(fault_counts.keys(), key=lambda c: fault_counts[c], reverse=True)
+            fault_pareto = {c: fault_counts[c] for c in sorted_codes}
+
+            fault_stats = {}
+            for c in sorted_codes:
+                cnt = fault_counts[c]
+                dtime = round(fault_downtimes.get(c, 0.0), 2)
+                pct = round((cnt / total_faults) * 100.0, 1) if total_faults > 0 else 0.0
+                fault_stats[c] = {
+                    "count": cnt,
+                    "downtime_seconds": dtime,
+                    "pct_of_faults": pct,
+                }
+
+            # Availability %
+            if (active_prod_sec + total_downtime_sec) > 0:
+                availability_pct = round((active_prod_sec / (active_prod_sec + total_downtime_sec)) * 100.0, 1)
+            else:
+                availability_pct = 100.0
 
             return {
                 "total_runs": r_total,
                 "completed_runs": r_completed,
+                "failed_runs": r_failed,
+                "interrupted_runs": r_interrupted,
+                "cancelled_runs": r_cancelled,
                 "total_parts_placed": total_parts,
                 "completed_cycles_count": len(cycle_durs),
                 "avg_cycle_time_sec": avg_cycle,
+                "min_cycle_time_sec": min_cycle,
+                "max_cycle_time_sec": max_cycle,
                 "p95_cycle_time_sec": p95_cycle,
+                "active_production_time_sec": active_prod_sec,
+                "throughput_parts_per_hour": throughput_per_hour,
+                "throughput_parts_per_minute": throughput_per_min,
                 "step_time_breakdown": step_breakdown,
+                "bottleneck_step": bottleneck_step,
                 "total_faults": total_faults,
+                "total_downtime_seconds": total_downtime_sec,
+                "operational_availability_pct": availability_pct,
                 "fault_pareto": fault_pareto,
+                "fault_stats": fault_stats,
             }
 
     def close(self) -> None:

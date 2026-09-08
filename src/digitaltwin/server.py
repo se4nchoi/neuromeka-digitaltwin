@@ -341,6 +341,11 @@ async def get_kpi_summary():
     return await asyncio.to_thread(engine.storage.calculate_kpi_summary)
 
 
+@app.get("/api/production/timeline")
+async def get_production_timeline(limit: int = 30):
+    return await asyncio.to_thread(engine.storage.get_state_timeline, limit=limit)
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "mode": engine.mode, "workcell_state": engine.workcell_state}

@@ -175,9 +175,17 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(kpis["total_parts_placed"], 2)
         self.assertEqual(kpis["completed_cycles_count"], 2)
         self.assertAlmostEqual(kpis["avg_cycle_time_sec"], 5.5, places=1)
+        self.assertEqual(kpis["min_cycle_time_sec"], 5.0)
+        self.assertEqual(kpis["max_cycle_time_sec"], 6.0)
         self.assertGreater(kpis["p95_cycle_time_sec"], 0)
+        self.assertEqual(kpis["throughput_parts_per_hour"], 600.0)
+        self.assertEqual(kpis["throughput_parts_per_minute"], 10.0)
         self.assertIn("PICK_APPROACH", kpis["step_time_breakdown"])
+        self.assertEqual(kpis["step_time_breakdown"]["PICK_APPROACH"]["pct_of_cycle"], 100.0)
+        self.assertEqual(kpis["bottleneck_step"], "PICK_APPROACH")
         self.assertEqual(kpis["fault_pareto"].get("SENSOR_TIMEOUT"), 1)
+        self.assertIn("SENSOR_TIMEOUT", kpis["fault_stats"])
+        self.assertGreaterEqual(kpis["operational_availability_pct"], 0.0)
 
     def test_api_endpoints_for_production(self):
         """Verify REST API production endpoints directly via async route handlers."""
@@ -186,6 +194,10 @@ class PersistenceTests(unittest.TestCase):
         server.engine.storage = self.storage
 
         try:
+            # Seed transitions
+            self.storage.record_state_transition("IDLE", "RUNNING", "START_PALLETIZE")
+            self.storage.record_state_transition("RUNNING", "IDLE", "CYCLE_COMPLETE")
+
             # Seed a run
             rid = self.storage.start_run("api-test-run", "pb1", "SIMULATION", "recipe-1", "1.0.0", 8)
             cid = self.storage.start_cycle(rid, 0, 0)
@@ -212,8 +224,15 @@ class PersistenceTests(unittest.TestCase):
             # 4. GET /api/production/kpi/summary
             kpi_data = asyncio.run(server.get_kpi_summary())
             self.assertEqual(kpi_data["completed_runs"], 1)
+            self.assertIn("throughput_parts_per_hour", kpi_data)
 
-            # 5. GET /api/commands/{command_id} fallback to storage
+            # 5. GET /api/production/timeline
+            timeline = asyncio.run(server.get_production_timeline())
+            self.assertIsInstance(timeline, list)
+            self.assertGreaterEqual(len(timeline), 2)
+            self.assertIn("duration_seconds", timeline[0])
+
+            # 6. GET /api/commands/{command_id} fallback to storage
             cmd_data = asyncio.run(server.get_command(rid))
             self.assertEqual(cmd_data["command_id"], "api-test-run")
             self.assertEqual(cmd_data["status"], "completed")

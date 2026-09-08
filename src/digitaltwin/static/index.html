@@ -127,6 +127,16 @@
           <span id="opText">OP_IDLE (5)</span>
         </div>
 
+        <!-- Quick KPI Stats Badge -->
+        <div class="badge kpi-quick-badge" id="kpiQuickBadge" title="Click to view Production & KPI Dashboard">
+          <span class="kpi-icon">📊</span>
+          <span id="kpiQuickParts">0 Parts</span>
+          <span class="kpi-sep">·</span>
+          <span id="kpiQuickThroughput">0.0/h</span>
+          <span class="kpi-sep">·</span>
+          <span id="kpiQuickCycle">0.00s avg</span>
+        </div>
+
         <!-- Mode Toggle & Lighting Mode -->
         <button class="mode-toggle-btn" id="btnToggleMode">MODE: HARDWARE LIVE</button>
         <button class="mode-toggle-btn" id="btnLighting" title="Switch Lighting Intensity (Bright / Ultra / Moody)">☀️ LIGHT: BRIGHT</button>
@@ -362,6 +372,9 @@
           </button>
           <button class="drawer-tab" data-tab="tab-waypoints">
             <span>📍</span> WAYPOINTS & MISSION PLANNER
+          </button>
+          <button class="drawer-tab" data-tab="tab-production" id="tabBtnProduction">
+            <span>📊</span> PRODUCTION & KPIS
           </button>
         </div>
 
@@ -698,6 +711,209 @@
           </div>
         </div>
 
+        <!-- ===============================================================
+             TAB 4: PRODUCTION & KPIS (Milestone 2)
+             =============================================================== -->
+        <div class="tab-content" id="tab-production">
+          <div class="kpi-dashboard-wrapper">
+
+            <!-- KPI Toolbar -->
+            <div class="kpi-toolbar">
+              <div class="kpi-toolbar-left">
+                <div class="kpi-toolbar-title-box">
+                  <span class="kpi-main-title">WORKCELL PRODUCTION &amp; KPI ANALYTICS</span>
+                  <span class="kpi-recipe-tag" id="kpiRecipeTag">RECIPE: pallet-2x2x2-default v1.0.0</span>
+                </div>
+                <div class="sync-status-box">
+                  <span class="pulse-dot active-pulse" id="kpiSyncPulse"></span>
+                  <span id="kpiSyncLabel" class="sync-label">SYNCING...</span>
+                </div>
+              </div>
+
+              <div class="kpi-toolbar-right">
+                <div class="kpi-control-item">
+                  <label for="selPollInterval" class="kpi-label-sm">REFRESH:</label>
+                  <select id="selPollInterval" class="form-select-sm">
+                    <option value="1000">1s (Real-time)</option>
+                    <option value="3000" selected>3s (Nominal)</option>
+                    <option value="10000">10s (Relaxed)</option>
+                    <option value="0">Paused</option>
+                  </select>
+                </div>
+                <button class="btn-kpi-action" id="btnRefreshKpi" title="Refresh all production metrics now">
+                  <span>🔄</span> REFRESH
+                </button>
+                <button class="btn-kpi-action" id="btnExportCsv" title="Export production runs to CSV">
+                  <span>📥</span> CSV
+                </button>
+                <button class="btn-kpi-action" id="btnExportJson" title="Export full KPI summary to JSON">
+                  <span>📥</span> JSON
+                </button>
+                <button class="btn-kpi-action btn-kpi-expand" id="btnToggleExpandDrawer" title="Expand / Compact Analytics Workspace">
+                  ⛶ EXPAND VIEW
+                </button>
+              </div>
+            </div>
+
+            <!-- 1. Executive Metric Stat Cards (6 Cards) -->
+            <div class="kpi-cards-grid">
+              <!-- Card 1: Output -->
+              <div class="kpi-card card-output">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">TOTAL OUTPUT</span>
+                  <span class="kpi-card-icon">📦</span>
+                </div>
+                <div class="kpi-card-value" id="kpiValOutput">0</div>
+                <div class="kpi-card-sub" id="kpiSubOutput">0 completed / 0 total runs</div>
+              </div>
+
+              <!-- Card 2: Throughput -->
+              <div class="kpi-card card-throughput">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">THROUGHPUT RATE</span>
+                  <span class="kpi-card-icon">⚡</span>
+                </div>
+                <div class="kpi-card-value"><span id="kpiValThroughput">0.0</span> <span class="kpi-unit">/hr</span></div>
+                <div class="kpi-card-sub" id="kpiSubThroughput">0.00 parts / min</div>
+              </div>
+
+              <!-- Card 3: Avg Cycle -->
+              <div class="kpi-card card-cycle">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">AVG CYCLE TIME</span>
+                  <span class="kpi-card-icon">⏱️</span>
+                </div>
+                <div class="kpi-card-value" id="kpiValAvgCycle">0.00s</div>
+                <div class="kpi-card-sub" id="kpiSubAvgCycle">Target: &lt; 5.00s</div>
+              </div>
+
+              <!-- Card 4: P95 Cycle -->
+              <div class="kpi-card card-p95">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">P95 TAIL LATENCY</span>
+                  <span class="kpi-card-icon">🎯</span>
+                </div>
+                <div class="kpi-card-value" id="kpiValP95Cycle">0.00s</div>
+                <div class="kpi-card-sub" id="kpiSubP95Cycle">Process stability metric</div>
+              </div>
+
+              <!-- Card 5: Availability -->
+              <div class="kpi-card card-avail">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">AVAILABILITY (OEE)</span>
+                  <span class="kpi-card-icon">🛡️</span>
+                </div>
+                <div class="kpi-card-value" id="kpiValAvailability">100.0%</div>
+                <div class="kpi-card-sub" id="kpiSubAvailability">Active runtime: 0.0s</div>
+              </div>
+
+              <!-- Card 6: Downtime -->
+              <div class="kpi-card card-downtime">
+                <div class="kpi-card-header">
+                  <span class="kpi-card-label">TOTAL DOWNTIME</span>
+                  <span class="kpi-card-icon">⚠️</span>
+                </div>
+                <div class="kpi-card-value" id="kpiValDowntime">0.0s</div>
+                <div class="kpi-card-sub" id="kpiSubDowntime">0 fault alarms recorded</div>
+              </div>
+            </div>
+
+            <!-- 2. Dual Analytics Columns: Step Breakdown & Downtime Pareto -->
+            <div class="kpi-charts-grid">
+              
+              <!-- Column A: Process Step Breakdown -->
+              <div class="kpi-panel">
+                <div class="kpi-panel-header">
+                  <div class="kpi-panel-title-group">
+                    <span class="kpi-panel-title">CYCLE STEP BREAKDOWN (8 PHASES)</span>
+                    <span class="kpi-panel-desc">Time allocation across Pick, Transfer, Place, and Dwell</span>
+                  </div>
+                  <span class="badge-bottleneck" id="kpiBottleneckBadge" style="display: none;">BOTTLENECK: N/A</span>
+                </div>
+
+                <!-- Segmented Stacked Bar -->
+                <div class="step-breakdown-bar" id="stepBreakdownBar">
+                  <!-- Populated dynamically -->
+                </div>
+
+                <!-- Step Breakdown Table / Legend -->
+                <div class="step-breakdown-list" id="stepBreakdownList">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+
+              <!-- Column B: Downtime Pareto & Fault Distribution -->
+              <div class="kpi-panel">
+                <div class="kpi-panel-header">
+                  <div class="kpi-panel-title-group">
+                    <span class="kpi-panel-title">DOWNTIME PARETO ANALYSIS</span>
+                    <span class="kpi-panel-desc">Fault occurrence frequency and cumulative impact</span>
+                  </div>
+                </div>
+
+                <!-- Pareto Chart Container -->
+                <div class="pareto-chart-container" id="paretoChartContainer">
+                  <!-- Populated dynamically -->
+                </div>
+              </div>
+
+            </div>
+
+            <!-- 3. Equipment State Timeline Ribbon -->
+            <div class="kpi-panel">
+              <div class="kpi-panel-header">
+                <div class="kpi-panel-title-group">
+                  <span class="kpi-panel-title">EQUIPMENT STATE TIMELINE</span>
+                  <span class="kpi-panel-desc">Chronological state transitions and duration</span>
+                </div>
+                <div class="timeline-legend">
+                  <span class="legend-item"><span class="legend-dot dot-running"></span> RUNNING</span>
+                  <span class="legend-item"><span class="legend-dot dot-idle"></span> IDLE</span>
+                  <span class="legend-item"><span class="legend-dot dot-fault"></span> FAULTED</span>
+                  <span class="legend-item"><span class="legend-dot dot-stopped"></span> STOPPED</span>
+                </div>
+              </div>
+
+              <div class="timeline-ribbon-wrapper">
+                <div class="state-timeline-ribbon" id="stateTimelineRibbon">
+                  <!-- Populated dynamically -->
+                </div>
+                <div class="state-timeline-tooltip" id="stateTimelineTooltip" style="display: none;"></div>
+              </div>
+            </div>
+
+            <!-- 4. Recent Production Runs Table -->
+            <div class="kpi-panel">
+              <div class="kpi-panel-header">
+                <div class="kpi-panel-title-group">
+                  <span class="kpi-panel-title">HISTORICAL PRODUCTION RUNS</span>
+                  <span class="kpi-panel-desc">Immutable run records stored in SQLite database</span>
+                </div>
+              </div>
+
+              <div class="runs-table-scroll">
+                <table class="kpi-table">
+                  <thead>
+                    <tr>
+                      <th>RUN ID</th>
+                      <th>ROUTINE</th>
+                      <th>ORIGIN</th>
+                      <th>STATUS</th>
+                      <th>PARTS PLACED</th>
+                      <th>DURATION</th>
+                      <th>TIMESTAMP (UTC)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="runsTableBody">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -706,5 +922,6 @@
   <!-- Digital Twin Main Script -->
   <script src="/static/workcell.js"></script>
   <script src="/static/digitaltwin.js"></script>
+  <script src="/static/dashboard.js"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 import os
 
 # Server configuration
-SERVER_HOST = os.getenv("DIGITALTWIN_HOST", "127.0.0.1")
+SERVER_HOST = os.getenv("DIGITALTWIN_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("DIGITALTWIN_PORT", "8088"))
 STARTUP_MODE = os.getenv("DIGITALTWIN_MODE", "SIMULATION").upper()
 if STARTUP_MODE not in {"SIMULATION", "HARDWARE_LIVE"}:

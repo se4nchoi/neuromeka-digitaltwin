@@ -24,16 +24,33 @@ Regression coverage executes real motion samples and checks joint/TCP consistenc
 - REST endpoints for querying runs (`/api/production/runs`), run details with nested cycles/steps (`/api/production/runs/{run_id}`), chronological event timeline (`/api/production/events`), and aggregated KPI summaries (`/api/production/kpi/summary`).
 - Complete automated test suite in `tests/test_persistence.py`.
 
-## Next milestone: Milestone 2 — KPI and production dashboard
+## Implemented: Milestone 2 — KPI and production dashboard
 
-1. Build production history and analytics dashboard views (completed parts, throughput).
-2. Display average and p95 cycle time metrics calculated from durable cycle records.
-3. Visualize step-time breakdown (approach, plunge, grip, extract, release).
-4. Render equipment state timeline and downtime Pareto charts from persisted events.
+- Production analytics and KPI calculation engine (`storage.py`, `server.py`).
+  - Total parts placed and real-time throughput rate (parts/hr and parts/min).
+  - Cycle time metrics: Average, P95 tail latency, Minimum, and Maximum durations.
+  - Step breakdown with percentage contribution and automatic bottleneck identification.
+  - Workcell operational availability percentage ($T_{\text{active}} / (T_{\text{active}} + T_{\text{downtime}}) \times 100$) and total downtime tracking.
+  - Downtime Pareto chart attributing occurrences and cumulative downtime to fault codes.
+  - Equipment state timeline (`GET /api/production/timeline`) calculating exact state transition durations (`RUNNING`, `IDLE`, `FAULTED`, `STOPPED`).
+- Rich, glassmorphic client-side dashboard in `src/digitaltwin/static/dashboard.js`, `index.html`, and `style.css`:
+  - Quick KPI status badge in top navigation bar (`#kpiQuickBadge`) with click-to-open.
+  - `📊 PRODUCTION & KPIS` workspace in Multi-Purpose Center drawer with `⛶ EXPAND VIEW` toggle.
+  - 6 executive metric cards with top accent gradients and glowing hover animations.
+  - 8-phase process step segmented stacked bar with interactive tooltip and bottleneck badge.
+  - Downtime Pareto chart with occurrence counts, downtime seconds, and cumulative line.
+  - Horizontal equipment state ribbon with hover tooltips for state, trigger, and duration.
+  - Historical production runs table with status pills, durations, and UTC timestamps.
+  - Live auto-refresh engine (1s/3s/10s/paused) and instant refresh on telemetry/commands.
+  - One-click export to CSV and JSON.
 
-## Then: production workflow
+## Next milestone: Milestone 3 — Work-order and recipe workflow
 
-Add versioned recipes, work orders, part/pallet-slot traceability, pallet-change handling, and order summaries. Snapshot the recipe at order start.
+1. Add versioned recipes (e.g. `pallet-2x2x2-standard`, `pallet-1x2x2-half`, speeds, approach clearances).
+2. Implement work-order lifecycle (`PENDING` -> `RUNNING` -> `COMPLETED` / `CANCELLED`).
+3. Associate each production run with a specific work order, snapshotting recipe parameters at run start.
+4. Part and pallet-slot traceability: link each placed billet to its cycle, slot, and order.
+5. Pallet-change workflow: operator signal for pallet swap upon full capacity.
 
 ## Then: validated optimization and AI
 

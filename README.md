@@ -18,6 +18,8 @@ Run the behavior and HTTP/WebSocket integration tests with `uv run python -m uni
 ![FastAPI](https://img.shields.io/badge/FastAPI-Modern%20Async-green)
 ![Three.js](https://img.shields.io/badge/Three.js-WebGL%203D-black)
 
+![Neuromeka Digital Twin](docs/digital_twin_neuromeka.jpg)
+
 ---
 
 ## Key Features

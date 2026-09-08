@@ -5,7 +5,7 @@ Usage:
 """
 
 import uvicorn
-from src.digitaltwin.config import SERVER_HOST, SERVER_PORT
+from digitaltwin.config import SERVER_HOST, SERVER_PORT
 
 
 def main():
@@ -15,7 +15,7 @@ def main():
     print("=" * 65)
 
     uvicorn.run(
-        "src.digitaltwin.server:app",
+        "digitaltwin.server:app",
         host=SERVER_HOST,
         port=SERVER_PORT,
         reload=False,

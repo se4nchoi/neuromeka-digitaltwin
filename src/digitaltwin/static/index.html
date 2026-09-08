@@ -104,8 +104,8 @@
       <div class="brand-block">
         <div class="logo-badge">I7</div>
         <div class="title-col">
-          <span class="main-title">NEUROMEKA INDY7 &bull; MULTI-PURPOSE CENTER</span>
-          <span class="sub-title">3D DIGITAL TWIN &bull; WEB TEACH PENDANT &bull; WAYPOINT MISSION PLANNER</span>
+          <span class="main-title">INDY7 PALLETIZING CELL</span>
+          <span class="sub-title">DIGITAL TWIN / OPERATOR STATION</span>
         </div>
       </div>
 
@@ -145,9 +145,10 @@
         <!-- Mode Toggle & Lighting Mode -->
         <button class="mode-toggle-btn" id="btnToggleMode">MODE: HARDWARE LIVE</button>
         <button class="mode-toggle-btn" id="btnLighting" title="Switch Lighting Intensity (Bright / Ultra / Moody)">☀️ LIGHT: BRIGHT</button>
-        <button class="btn-drawer-toggle" id="btnDrawerToggle" title="Toggle Multi-Purpose Center Drawer">
-          <span>🛠️</span> MULTI-PURPOSE CENTER
+        <button class="btn-drawer-toggle" id="btnDrawerToggle" title="Open operator controls">
+          CONTROLS
         </button>
+        <button class="btn-header-stop" id="btnHeaderStop">STOP MOTION <span>CAT 2</span></button>
       </div>
     </header>
 
@@ -291,7 +292,7 @@
       </aside>
 
       <!-- RIGHT HUD: PALLET HUD & CYCLE EXECUTION -->
-      <aside class="side-hud">
+      <aside class="side-hud operator-rail">
 
         <!-- Pallet 8-Slot Matrix Card -->
         <div class="card glass-panel hud-interactive">
@@ -350,14 +351,15 @@
         </div>
 
         <!-- Gripper & Trajectory Controls -->
-        <div class="card glass-panel hud-interactive" style="display: flex; justify-content: space-between; align-items: center;">
-          <div>
-            <div style="font-size: 11px; font-weight: 700; color: var(--text-muted);">PNEUMATIC GRIPPER</div>
-            <div id="gripperStatusText" style="font-family: var(--font-mono); font-size: 12px; color: var(--accent-cyan);">OPEN (DO0)</div>
+        <div class="card glass-panel hud-interactive tool-summary-card">
+          <div class="tool-summary-copy">
+            <div class="tool-summary-label">ATTACHED TOOL</div>
+            <div class="tool-summary-name">Pneumatic parallel gripper</div>
+            <div id="gripperStatusText" class="tool-summary-state">OPEN (DO0)</div>
           </div>
-          <div style="display: flex; gap: 8px;">
-            <button class="btn-toggle-sensor" id="btnQuickGripper">TOGGLE JAW</button>
-            <button class="btn-toggle-sensor" id="btnClearTrail">CLEAR TRAIL</button>
+          <div class="tool-summary-actions">
+            <button class="btn-toggle-sensor" id="btnQuickGripper">OPEN / CLOSE</button>
+            <button class="btn-toggle-sensor" id="btnClearTrail">CLEAR PATH</button>
           </div>
         </div>
 
@@ -366,7 +368,7 @@
     </div>
 
     <!-- MULTI-PURPOSE CENTER DRAWER / PANEL -->
-    <div class="multi-center-panel glass-panel hud-interactive" id="multiCenterDrawer">
+    <div class="multi-center-panel glass-panel hud-interactive collapsed" id="multiCenterDrawer">
 
       <!-- Center Tabs Header -->
       <div class="drawer-tabs-header">
@@ -379,6 +381,9 @@
           </button>
           <button class="drawer-tab" data-tab="tab-waypoints">
             <span>📍</span> WAYPOINTS & MISSION PLANNER
+          </button>
+          <button class="drawer-tab" data-tab="tab-diagnostics">
+            <span>◫</span> DIAGNOSTICS
           </button>
         </div>
 

@@ -842,6 +842,16 @@
 
   // --- MULTI-PURPOSE CENTER UI INITIALIZATION ---
   function initMultiCenter() {
+    // Keep engineering telemetry available without crowding the operator view.
+    const diagnosticsSource = document.querySelector(".diagnostics-source");
+    const diagnosticsMount = document.getElementById("diagnosticsMount");
+    if (diagnosticsSource && diagnosticsMount) {
+      while (diagnosticsSource.firstChild) {
+        diagnosticsMount.appendChild(diagnosticsSource.firstChild);
+      }
+      diagnosticsSource.remove();
+    }
+
     // 1. Drawer Tabs Switching
     const tabs = document.querySelectorAll(".drawer-tab");
     tabs.forEach(tab => {
@@ -884,6 +894,13 @@
     document.getElementById("btnProgRecover").addEventListener("click", () => sendCmd("recover"));
     document.getElementById("btnProgResetPallet").addEventListener("click", () => fetch("/api/reset_pallet", { method: "POST" }));
     document.getElementById("btnProgStop").addEventListener("click", () => sendCmd("stop", { active: true }));
+    const btnHeaderStop = document.getElementById("btnHeaderStop");
+    if (btnHeaderStop) {
+      btnHeaderStop.addEventListener("click", () => {
+        const stopIsActive = btnHeaderStop.dataset.active === "true";
+        sendCmd("stop", { active: !stopIsActive });
+      });
+    }
 
     // Direct Teaching Free-Drive Toggle
     const btnDirectTeach = document.getElementById("btnToggleDirectTeach");
@@ -1372,6 +1389,16 @@
         btnMode.style.borderColor = "var(--accent-crimson)";
         btnMode.style.color = "var(--accent-crimson)";
       }
+    }
+
+    const btnHeaderStop = document.getElementById("btnHeaderStop");
+    if (btnHeaderStop) {
+      const stopIsActive = !!(data.plc_io && data.plc_io.stop);
+      btnHeaderStop.dataset.active = stopIsActive ? "true" : "false";
+      btnHeaderStop.innerHTML = stopIsActive
+        ? "CLEAR STOP <span>RESET REQUEST</span>"
+        : "STOP MOTION <span>CAT 2</span>";
+      btnHeaderStop.classList.toggle("is-active", stopIsActive);
     }
 
     // Direct Teaching Button state

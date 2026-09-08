@@ -93,6 +93,12 @@ async def get_index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+@app.get("/production")
+@app.get("/analytics")
+async def get_production_page():
+    return FileResponse(os.path.join(STATIC_DIR, "production.html"))
+
+
 @app.get("/api/state")
 async def get_state():
     return engine.get_telemetry_packet()

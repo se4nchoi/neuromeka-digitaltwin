@@ -1516,6 +1516,31 @@ body, html {
    MILESTONE 2: PRODUCTION & KPI ANALYTICS DASHBOARD STYLES
    ========================================================================== */
 
+/* Navigation Link Button between Twin and Analytics */
+.btn-nav-page {
+  background: rgba(6, 182, 212, 0.15);
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  color: #e0f2fe;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 6px;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.btn-nav-page:hover {
+  background: rgba(6, 182, 212, 0.3);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 16px var(--accent-cyan-glow);
+  transform: translateY(-1px);
+  color: #fff;
+}
+
 /* Quick KPI Top Badge */
 .kpi-quick-badge {
   background: rgba(6, 182, 212, 0.12);

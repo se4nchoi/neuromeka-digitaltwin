@@ -1,6 +1,7 @@
 /**
  * Indy7 Digital Twin - Production & KPI Analytics Dashboard
- * Milestone 2: Production metrics, step breakdowns, downtime Pareto, state timeline.
+ * Milestone 2: Production metrics, step breakdowns, downtime Pareto, state timeline,
+ * event audit trail, and run details inspector.
  */
 (() => {
   const byId = (id) => document.getElementById(id);
@@ -12,6 +13,8 @@
   let lastKpiData = null;
   let lastRunsData = [];
   let lastTimelineData = [];
+  let lastEventsData = [];
+  let activeEventFilter = 'all';
 
   // Phase color palette for the 8 process steps
   const STEP_COLORS = {
@@ -46,10 +49,11 @@
   // ---------------------------------------------------------------------------
   async function fetchDashboardData() {
     try {
-      const [kpiRes, runsRes, timelineRes] = await Promise.all([
+      const [kpiRes, runsRes, timelineRes, eventsRes] = await Promise.all([
         fetch('/api/production/kpi/summary'),
-        fetch('/api/production/runs?limit=15'),
+        fetch('/api/production/runs?limit=30'),
         fetch('/api/production/timeline?limit=30'),
+        fetch('/api/production/events?limit=40'),
       ]);
 
       if (kpiRes.ok) {
@@ -68,6 +72,11 @@
       if (timelineRes.ok) {
         lastTimelineData = await timelineRes.json();
         renderStateTimeline(lastTimelineData);
+      }
+
+      if (eventsRes.ok) {
+        lastEventsData = await eventsRes.json();
+        renderEventsFeed(lastEventsData, activeEventFilter);
       }
 
       updateSyncIndicator(true);
@@ -91,7 +100,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Top-Bar Quick KPI Badge
+  // Top-Bar Quick KPI Badge (Present on 3D Twin Page)
   // ---------------------------------------------------------------------------
   function renderQuickBadge(kpi) {
     if (!kpi) return;
@@ -111,37 +120,49 @@
     if (!kpi) return;
 
     // 1. Total Parts Placed
-    byId('kpiValOutput').textContent = kpi.total_parts_placed || 0;
-    byId('kpiSubOutput').textContent = `${kpi.completed_runs || 0} completed / ${kpi.total_runs || 0} total runs`;
+    if (byId('kpiValOutput')) {
+      byId('kpiValOutput').textContent = kpi.total_parts_placed || 0;
+      byId('kpiSubOutput').textContent = `${kpi.completed_runs || 0} completed / ${kpi.total_runs || 0} total runs`;
+    }
 
     // 2. Throughput Rate
-    const tpHr = kpi.throughput_parts_per_hour || 0;
-    const tpMin = kpi.throughput_parts_per_minute || 0;
-    byId('kpiValThroughput').textContent = `${tpHr.toFixed(1)}`;
-    byId('kpiSubThroughput').textContent = `${tpMin.toFixed(2)} parts / min`;
+    if (byId('kpiValThroughput')) {
+      const tpHr = kpi.throughput_parts_per_hour || 0;
+      const tpMin = kpi.throughput_parts_per_minute || 0;
+      byId('kpiValThroughput').textContent = `${tpHr.toFixed(1)}`;
+      byId('kpiSubThroughput').textContent = `${tpMin.toFixed(2)} parts / min`;
+    }
 
     // 3. Average Cycle Time
-    const avgC = (kpi.avg_cycle_time_sec || 0).toFixed(2);
-    const minC = (kpi.min_cycle_time_sec || 0).toFixed(2);
-    const maxC = (kpi.max_cycle_time_sec || 0).toFixed(2);
-    byId('kpiValAvgCycle').textContent = `${avgC}s`;
-    byId('kpiSubAvgCycle').textContent = `Range: ${minC}s – ${maxC}s (n=${kpi.completed_cycles_count || 0})`;
+    if (byId('kpiValAvgCycle')) {
+      const avgC = (kpi.avg_cycle_time_sec || 0).toFixed(2);
+      const minC = (kpi.min_cycle_time_sec || 0).toFixed(2);
+      const maxC = (kpi.max_cycle_time_sec || 0).toFixed(2);
+      byId('kpiValAvgCycle').textContent = `${avgC}s`;
+      byId('kpiSubAvgCycle').textContent = `Range: ${minC}s – ${maxC}s (n=${kpi.completed_cycles_count || 0})`;
+    }
 
     // 4. P95 Cycle Time (Process Tail Latency)
-    const p95C = (kpi.p95_cycle_time_sec || 0).toFixed(2);
-    byId('kpiValP95Cycle').textContent = `${p95C}s`;
-    byId('kpiSubP95Cycle').textContent = p95C > 0 ? `95% of cycles ≤ ${p95C}s` : 'No completed cycles yet';
+    if (byId('kpiValP95Cycle')) {
+      const p95C = (kpi.p95_cycle_time_sec || 0).toFixed(2);
+      byId('kpiValP95Cycle').textContent = `${p95C}s`;
+      byId('kpiSubP95Cycle').textContent = p95C > 0 ? `95% of cycles ≤ ${p95C}s` : 'No completed cycles yet';
+    }
 
     // 5. Workcell Operational Availability
-    const avail = (kpi.operational_availability_pct || 100.0).toFixed(1);
-    const actProdSec = (kpi.active_production_time_sec || 0).toFixed(1);
-    byId('kpiValAvailability').textContent = `${avail}%`;
-    byId('kpiSubAvailability').textContent = `Active runtime: ${actProdSec}s`;
+    if (byId('kpiValAvailability')) {
+      const avail = (kpi.operational_availability_pct || 100.0).toFixed(1);
+      const actProdSec = (kpi.active_production_time_sec || 0).toFixed(1);
+      byId('kpiValAvailability').textContent = `${avail}%`;
+      byId('kpiSubAvailability').textContent = `Active runtime: ${actProdSec}s`;
+    }
 
     // 6. Downtime & Alarms
-    const dtSec = (kpi.total_downtime_seconds || 0).toFixed(1);
-    byId('kpiValDowntime').textContent = `${dtSec}s`;
-    byId('kpiSubDowntime').textContent = `${kpi.total_faults || 0} total fault alarms`;
+    if (byId('kpiValDowntime')) {
+      const dtSec = (kpi.total_downtime_seconds || 0).toFixed(1);
+      byId('kpiValDowntime').textContent = `${dtSec}s`;
+      byId('kpiSubDowntime').textContent = `${kpi.total_faults || 0} total fault alarms`;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -155,7 +176,7 @@
 
     if (!breakdown || Object.keys(breakdown).length === 0) {
       barEl.innerHTML = '<div class="step-bar-empty">No cycle process steps recorded yet</div>';
-      listEl.innerHTML = '<div class="kpi-empty-hint">Execute PB1 Palletizing to populate step breakdowns</div>';
+      listEl.innerHTML = '<div class="step-bar-empty">Execute Palletizing routines to populate step telemetry</div>';
       if (btagEl) btagEl.style.display = 'none';
       return;
     }
@@ -203,7 +224,7 @@
           </div>
           <span class="mono-val">${info.avg_duration_sec.toFixed(3)}s</span>
           <span class="mono-val">${info.pct_of_cycle}%</span>
-          <span class="mono-val text-muted">${info.count}</span>
+          <span class="mono-val" style="color: var(--text-dim);">${info.count}</span>
         </div>`;
     });
     listEl.innerHTML = listHtml;
@@ -240,8 +261,8 @@
           <div class="pareto-row-header">
             <span class="pareto-code-name">⚠️ ${code}</span>
             <span class="pareto-counts">
-              <strong>${stat.count} occurrences</strong> (${stat.pct_of_faults}%) · 
-              <span class="text-amber">${stat.downtime_seconds.toFixed(1)}s downtime</span> · 
+              <strong>${stat.count} occurrences</strong> (${stat.pct_of_faults}%) &bull; 
+              <span class="text-amber">${stat.downtime_seconds.toFixed(1)}s downtime</span> &bull; 
               <span class="text-cyan">Cum: ${cumRound}%</span>
             </span>
           </div>
@@ -268,9 +289,6 @@
       ribbonEl.innerHTML = '<div class="timeline-empty">No state transitions recorded</div>';
       return;
     }
-
-    // Total duration of visible window
-    const totalDuration = timeline.reduce((acc, cur) => acc + (cur.duration_seconds || 1), 0);
 
     let ribbonHtml = '';
     timeline.forEach((item, idx) => {
@@ -302,7 +320,7 @@
 
         tooltipEl.innerHTML = `
           <strong>${state}</strong> (${duration})<br>
-          <span style="color: var(--text-muted);">Trigger: ${trigger || 'N/A'} · ${time} UTC</span>`;
+          <span style="color: var(--text-muted);">Trigger: ${trigger || 'N/A'} &bull; ${time} UTC</span>`;
         tooltipEl.style.display = 'block';
         positionTooltip(e, tooltipEl);
       });
@@ -324,14 +342,56 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Recent Production Runs Table
+  // Real-time Operational Event Stream / Audit Log
+  // ---------------------------------------------------------------------------
+  function renderEventsFeed(events, filter) {
+    const container = byId('eventsListContainer');
+    if (!container) return;
+
+    if (!events || events.length === 0) {
+      container.innerHTML = '<div class="events-empty">No events logged yet</div>';
+      return;
+    }
+
+    const filtered = filter === 'all'
+      ? events
+      : events.filter(e => e.event_type === filter);
+
+    if (filtered.length === 0) {
+      container.innerHTML = `<div class="events-empty">No ${filter} events found</div>`;
+      return;
+    }
+
+    let html = '';
+    filtered.forEach((e) => {
+      const type = e.event_type || 'info';
+      const time = e.timestamp ? e.timestamp.replace('T', ' ').slice(11, 19) : '';
+      const summary = e.summary || '';
+      const detail = e.detail ? `(${e.detail})` : '';
+
+      html += `
+        <div class="event-row event-${type}">
+          <div class="event-main">
+            <span class="event-badge badge-${type}">${type}</span>
+            <span class="event-summary">${summary}</span>
+            <span class="event-detail">${detail}</span>
+          </div>
+          <span class="event-time">${time}</span>
+        </div>`;
+    });
+
+    container.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Historical Production Runs Table with Run Inspection
   // ---------------------------------------------------------------------------
   function renderRunsTable(runs) {
     const tbody = byId('runsTableBody');
     if (!tbody) return;
 
     if (!runs || runs.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="text-center py-4 text-muted">No production runs recorded yet</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="text-center py-4 text-muted">No production runs recorded yet</td></tr>`;
       return;
     }
 
@@ -351,11 +411,77 @@
           <td><span class="status-pill ${statusClass}">${r.status}</span></td>
           <td class="mono-val">${r.completed_count || 0} / ${r.target_count || 8}</td>
           <td class="mono-val">${dur}</td>
-          <td class="mono-val text-muted">${timeStr}</td>
+          <td class="mono-val" style="color: var(--text-dim);">${timeStr}</td>
+          <td style="text-align: right;">
+            <button class="btn-inspect-run" data-runid="${r.run_id}">Inspect</button>
+          </td>
         </tr>`;
     });
 
     tbody.innerHTML = rowsHtml;
+
+    // Attach inspect click handlers
+    tbody.querySelectorAll('.btn-inspect-run').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const runId = btn.dataset.runid;
+        inspectRun(runId);
+      });
+    });
+  }
+
+  async function inspectRun(runId) {
+    const modal = byId('modalRunDetails');
+    const subTitle = byId('modalRunSubtitle');
+    const body = byId('modalRunBody');
+    if (!modal || !body) return;
+
+    subTitle.textContent = `Loading run details for ${runId}...`;
+    body.innerHTML = '<div class="events-empty">Loading cycle and step telemetry...</div>';
+    modal.style.display = 'flex';
+
+    try {
+      const res = await fetch(`/api/production/runs/${runId}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      subTitle.textContent = `Run ID: ${data.run_id} · Routine: ${data.command} · Status: ${data.status} · Duration: ${data.duration_seconds || 0}s`;
+
+      if (!data.cycles || data.cycles.length === 0) {
+        body.innerHTML = '<div class="events-empty">No cycle records captured for this run.</div>';
+        return;
+      }
+
+      let html = '';
+      data.cycles.forEach((c) => {
+        const cDur = c.duration_seconds !== null ? `${c.duration_seconds.toFixed(2)}s` : 'active';
+        html += `
+          <div class="cycle-inspect-card">
+            <div class="cycle-inspect-header">
+              <span>CYCLE #${c.cycle_index + 1} (Target Slot: S${c.target_slot + 1})</span>
+              <span style="color: var(--accent-cyan);">${cDur} &bull; ${c.status}</span>
+            </div>
+            <div class="steps-mini-grid">`;
+
+        if (c.steps && c.steps.length > 0) {
+          c.steps.forEach((s) => {
+            const sDur = s.duration_seconds !== null ? `${s.duration_seconds.toFixed(3)}s` : 'active';
+            html += `
+              <div class="step-mini-pill">
+                <span class="step-mini-name">${s.step_name}</span>
+                <span class="step-mini-dur">${sDur}</span>
+              </div>`;
+          });
+        } else {
+          html += '<span style="font-size: 10px; color: var(--text-dim);">No steps recorded</span>';
+        }
+
+        html += `</div></div>`;
+      });
+
+      body.innerHTML = html;
+    } catch (err) {
+      body.innerHTML = `<div class="events-empty" style="color: var(--accent-crimson);">Failed to load run details: ${err.message}</div>`;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -367,9 +493,10 @@
       kpi_summary: lastKpiData,
       recent_runs: lastRunsData,
       state_timeline: lastTimelineData,
+      event_stream: lastEventsData,
     };
     const blob = new Blob([JSON.stringify(exportBundle, null, 2)], { type: 'application/json' });
-    downloadBlob(blob, `production_kpi_${Date.now()}.json`);
+    downloadBlob(blob, `production_analytics_${Date.now()}.json`);
   }
 
   function exportCsv() {
@@ -463,36 +590,44 @@
     const btnExpJson = byId('btnExportJson');
     if (btnExpJson) btnExpJson.addEventListener('click', exportJson);
 
-    // 5. Expand Drawer Toggle
-    const btnExpand = byId('btnToggleExpandDrawer');
-    const drawer = byId('multiCenterDrawer');
-    if (btnExpand && drawer) {
-      btnExpand.addEventListener('click', () => {
-        drawer.classList.toggle('expanded-view');
-        const isExp = drawer.classList.contains('expanded-view');
-        btnExpand.textContent = isExp ? '⛶ COMPACT VIEW' : '⛶ EXPAND VIEW';
+    // 5. Modal Close
+    const btnCloseModal = byId('btnCloseRunModal');
+    const modal = byId('modalRunDetails');
+    if (btnCloseModal && modal) {
+      btnCloseModal.addEventListener('click', () => {
+        modal.style.display = 'none';
+      });
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.style.display = 'none';
       });
     }
 
-    // 6. Quick Badge Click -> Switch to Production Tab
+    // 6. Event Filter Buttons
+    document.querySelectorAll('.btn-filter').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeEventFilter = btn.dataset.filter || 'all';
+        renderEventsFeed(lastEventsData, activeEventFilter);
+      });
+    });
+
+    // 7. Quick Badge Click (if present on 3D twin page, navigates to /production)
     const quickBadge = byId('kpiQuickBadge');
     if (quickBadge) {
       quickBadge.addEventListener('click', () => {
-        const tabBtn = byId('tabBtnProduction');
-        if (tabBtn) tabBtn.click();
+        window.location.href = '/production';
       });
     }
 
-    // 7. Instant Refresh on Telemetry & Cycle Events
+    // 8. Instant Refresh on Telemetry & Cycle Events
     window.addEventListener('workcell-telemetry', () => {
-      // Light update of quick badge if polling is active
       if (document.visibilityState === 'visible' && Math.random() < 0.2) {
         renderQuickBadge(lastKpiData);
       }
     });
 
     window.addEventListener('workcell-command', () => {
-      // Whenever a command completes or faults, trigger an immediate refresh
       setTimeout(fetchDashboardData, 400);
     });
   }

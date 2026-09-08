@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Indy7 Production &amp; Log Analytics Console</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/static/production.css">
+</head>
+<body>
+
+  <!-- RUN DETAILS MODAL DIALOG -->
+  <div id="modalRunDetails" class="modal-overlay" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <span class="modal-title">📦 PRODUCTION RUN INSPECTOR</span>
+          <div class="modal-subtitle" id="modalRunSubtitle">Run ID: -</div>
+        </div>
+        <button class="btn-modal-close" id="btnCloseRunModal">&times;</button>
+      </div>
+      <div class="modal-body" id="modalRunBody">
+        <!-- Dynamically populated with cycles & steps -->
+      </div>
+    </div>
+  </div>
+
+  <div class="app-layout">
+
+    <!-- TOP HEADER -->
+    <header class="top-header">
+      <div class="brand-block">
+        <div class="logo-badge">I7</div>
+        <div class="title-col">
+          <div class="brand-title">INDY7 PALLETIZING &bull; PRODUCTION &amp; LOG ANALYTICS</div>
+          <div class="brand-sub">DURABLE SQLITE EVENT MODEL &bull; CYCLE KPI METRICS &bull; AUDIT TRAIL</div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Reciprocal Navigation to 3D Twin -->
+        <a href="/" class="btn-nav-workcell" title="Switch to 3D Digital Twin & Workcell Controller">
+          <span>🎮</span> 3D DIGITAL TWIN ↗
+        </a>
+
+        <!-- Live Sync Status -->
+        <div class="sync-badge">
+          <span class="pulse-dot active-pulse" id="kpiSyncPulse"></span>
+          <span id="kpiSyncLabel" class="sync-text">SYNCED</span>
+        </div>
+
+        <!-- Refresh Selector -->
+        <div class="control-group">
+          <label for="selPollInterval" class="ctrl-label">POLL:</label>
+          <select id="selPollInterval" class="ctrl-select">
+            <option value="1000">1s (Real-time)</option>
+            <option value="3000" selected>3s (Nominal)</option>
+            <option value="10000">10s (Relaxed)</option>
+            <option value="0">Paused</option>
+          </select>
+        </div>
+
+        <button class="btn-ctrl" id="btnRefreshKpi" title="Refresh production data now">
+          <span>🔄</span> REFRESH
+        </button>
+        <button class="btn-ctrl" id="btnExportCsv" title="Export historical runs to CSV">
+          <span>📥</span> CSV
+        </button>
+        <button class="btn-ctrl" id="btnExportJson" title="Export full KPI summary to JSON">
+          <span>📥</span> JSON
+        </button>
+      </div>
+    </header>
+
+    <!-- MAIN DASHBOARD CONTENT -->
+    <main class="main-content">
+
+      <!-- SECTION 1: EXECUTIVE STAT CARDS (6 CARDS) -->
+      <section class="kpi-grid">
+        <!-- Card 1: Output -->
+        <div class="stat-card card-output">
+          <div class="stat-header">
+            <span class="stat-label">TOTAL OUTPUT</span>
+            <span class="stat-icon">📦</span>
+          </div>
+          <div class="stat-value" id="kpiValOutput">0</div>
+          <div class="stat-sub" id="kpiSubOutput">0 completed / 0 total runs</div>
+        </div>
+
+        <!-- Card 2: Throughput -->
+        <div class="stat-card card-throughput">
+          <div class="stat-header">
+            <span class="stat-label">THROUGHPUT RATE</span>
+            <span class="stat-icon">⚡</span>
+          </div>
+          <div class="stat-value">
+            <span id="kpiValThroughput">0.0</span>
+            <span class="stat-unit">/hr</span>
+          </div>
+          <div class="stat-sub" id="kpiSubThroughput">0.00 parts / min</div>
+        </div>
+
+        <!-- Card 3: Avg Cycle Time -->
+        <div class="stat-card card-cycle">
+          <div class="stat-header">
+            <span class="stat-label">AVG CYCLE TIME</span>
+            <span class="stat-icon">⏱️</span>
+          </div>
+          <div class="stat-value" id="kpiValAvgCycle">0.00s</div>
+          <div class="stat-sub" id="kpiSubAvgCycle">Target: &lt; 5.00s</div>
+        </div>
+
+        <!-- Card 4: P95 Tail Latency -->
+        <div class="stat-card card-p95">
+          <div class="stat-header">
+            <span class="stat-label">P95 TAIL LATENCY</span>
+            <span class="stat-icon">🎯</span>
+          </div>
+          <div class="stat-value" id="kpiValP95Cycle">0.00s</div>
+          <div class="stat-sub" id="kpiSubP95Cycle">95% of cycles ≤ target</div>
+        </div>
+
+        <!-- Card 5: Operational Availability -->
+        <div class="stat-card card-avail">
+          <div class="stat-header">
+            <span class="stat-label">AVAILABILITY (OEE)</span>
+            <span class="stat-icon">🛡️</span>
+          </div>
+          <div class="stat-value" id="kpiValAvailability">100.0%</div>
+          <div class="stat-sub" id="kpiSubAvailability">Active runtime: 0.0s</div>
+        </div>
+
+        <!-- Card 6: Total Downtime -->
+        <div class="stat-card card-downtime">
+          <div class="stat-header">
+            <span class="stat-label">TOTAL DOWNTIME</span>
+            <span class="stat-icon">⚠️</span>
+          </div>
+          <div class="stat-value" id="kpiValDowntime">0.0s</div>
+          <div class="stat-sub" id="kpiSubDowntime">0 fault alarms recorded</div>
+        </div>
+      </section>
+
+      <!-- SECTION 2: DUAL ANALYTICS PANELS (STEP BREAKDOWN & DOWNTIME PARETO) -->
+      <section class="dual-grid">
+
+        <!-- Column A: Process Step Breakdown -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">CYCLE STEP BREAKDOWN (8 MOTION &amp; DWELL PHASES)</div>
+              <div class="panel-desc">Time allocation across Pick, Transfer, Place, and Pneumatic Grip</div>
+            </div>
+            <span class="bottleneck-pill" id="kpiBottleneckBadge" style="display: none;">BOTTLENECK: N/A</span>
+          </div>
+
+          <!-- Segmented Stacked Bar -->
+          <div class="step-bar" id="stepBreakdownBar">
+            <!-- Populated dynamically -->
+          </div>
+
+          <!-- Step Table / Legend -->
+          <div class="step-list" id="stepBreakdownList">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <!-- Column B: Downtime Pareto Analysis -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">DOWNTIME PARETO ANALYSIS</div>
+              <div class="panel-desc">Fault occurrence frequency and cumulative downtime attribution</div>
+            </div>
+          </div>
+
+          <!-- Pareto Chart Container -->
+          <div class="pareto-container" id="paretoChartContainer">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+      </section>
+
+      <!-- SECTION 3: EQUIPMENT STATE TIMELINE & EVENT AUDIT LOG -->
+      <section class="dual-grid">
+
+        <!-- Equipment State Timeline Ribbon -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">EQUIPMENT STATE TIMELINE</div>
+              <div class="panel-desc">Chronological state transitions and active durations</div>
+            </div>
+            <div class="timeline-legend">
+              <span class="legend-chip"><span class="chip-dot dot-running"></span> RUNNING</span>
+              <span class="legend-chip"><span class="chip-dot dot-idle"></span> IDLE</span>
+              <span class="legend-chip"><span class="chip-dot dot-fault"></span> FAULTED</span>
+              <span class="legend-chip"><span class="chip-dot dot-stopped"></span> STOPPED</span>
+            </div>
+          </div>
+
+          <div class="timeline-wrapper">
+            <div class="timeline-ribbon" id="stateTimelineRibbon">
+              <!-- Populated dynamically -->
+            </div>
+            <div class="timeline-tooltip" id="stateTimelineTooltip" style="display: none;"></div>
+          </div>
+          <div class="timeline-caption">Hover over state blocks to inspect trigger, duration, and timestamp</div>
+        </div>
+
+        <!-- Real-time Event & Alarm Audit Feed -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <div class="panel-title">OPERATIONAL EVENT &amp; ALARM STREAM</div>
+              <div class="panel-desc">Live chronological feed of state changes, faults, and operator actions</div>
+            </div>
+            <div class="event-filter-group">
+              <button class="btn-filter active" data-filter="all">ALL</button>
+              <button class="btn-filter" data-filter="fault">FAULTS</button>
+              <button class="btn-filter" data-filter="transition">STATES</button>
+              <button class="btn-filter" data-filter="action">ACTIONS</button>
+            </div>
+          </div>
+
+          <div class="events-scroll" id="eventsListContainer">
+            <div class="events-empty">Connecting to event stream...</div>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- SECTION 4: HISTORICAL PRODUCTION RUNS TABLE -->
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">HISTORICAL PRODUCTION RUNS</div>
+            <div class="panel-desc">Immutable run records and cycle details stored in SQLite database</div>
+          </div>
+          <div class="recipe-badge">
+            RECIPE: pallet-2x2x2-default v1.0.0
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>RUN ID</th>
+                <th>ROUTINE</th>
+                <th>ORIGIN</th>
+                <th>STATUS</th>
+                <th>PARTS PLACED</th>
+                <th>DURATION</th>
+                <th>START TIME (UTC)</th>
+                <th style="text-align: right;">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="runsTableBody">
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

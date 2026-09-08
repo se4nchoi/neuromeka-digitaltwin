@@ -52,8 +52,16 @@ class ApiTests(unittest.TestCase):
 
     def test_health_and_ui(self):
         self.assertEqual(self.get('/api/health')['mode'], 'SIMULATION')
+        # 1. 3D Twin & Workcell page
         with urlopen(self.base, timeout=3) as response:
             self.assertIn('workcellDiagnostics', response.read().decode())
+        # 2. Dedicated Production & Log Analytics page
+        with urlopen(self.base + '/production', timeout=3) as response:
+            self.assertEqual(response.status, 200)
+            content = response.read().decode()
+            self.assertIn('PRODUCTION &amp; LOG ANALYTICS', content)
+        with urlopen(self.base + '/analytics', timeout=3) as response:
+            self.assertEqual(response.status, 200)
 
     def test_rest_websocket_validation_parity_and_telemetry(self):
         rest = self.post('/api/jog/joint', {'joint_idx': 9, 'step_deg': 1})

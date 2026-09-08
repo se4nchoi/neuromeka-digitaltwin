@@ -235,3 +235,114 @@ def forward_kinematics_craig(q: List[float]) -> List[float]:
     v = math.degrees(beta)
     w = math.degrees(gamma)
     return [round(float(x), 2), round(float(y), 2), round(float(z), 2), round(float(u), 2), round(float(v), 2), round(float(w), 2)]
+
+
+def compute_manipulability(q_deg: List[float]) -> float:
+    """Computes Yoshikawa manipulability index mu = sqrt(det(J * J^T)) for Indy7 Craig chain."""
+    try:
+        frames = joint_transforms(q_deg)
+        current = frames[-1]
+        p_ee = current[:3, 3] / 1000.0  # convert to meters
+        cols = []
+        for frame in frames:
+            z_axis = frame[:3, 2]
+            p_joint = frame[:3, 3] / 1000.0
+            j_v = np.cross(z_axis, p_ee - p_joint)
+            j_w = z_axis
+            cols.append(np.r_[j_v, j_w])
+        J = np.column_stack(cols)
+        # Position manipulability
+        J_pos = J[:3, :]
+        mu = float(np.sqrt(max(0.0, np.linalg.det(J_pos @ J_pos.T))))
+        return round(mu, 5)
+    except Exception:
+        return 0.0
+
+
+def analyze_trajectory_kinematics(trajectory_q: List[List[float]], duration_sec: float) -> dict:
+    """Computes peak joint velocities, accelerations, jerk, and continuity margins."""
+    n_points = len(trajectory_q)
+    if n_points < 2 or duration_sec <= 0:
+        return {
+            "duration_sec": duration_sec,
+            "max_step_deg": 0.0,
+            "max_joint_vel_deg_s": 0.0,
+            "max_joint_acc_deg_s2": 0.0,
+            "max_joint_jerk_deg_s3": 0.0,
+            "per_joint_max_vel": [0.0] * 6,
+            "per_joint_max_acc": [0.0] * 6,
+            "per_joint_max_jerk": [0.0] * 6,
+            "manipulability_min": 0.0,
+            "feasibility": "FEASIBLE",
+        }
+
+    dt = float(duration_sec) / float(n_points - 1)
+    q_arr = np.asarray(trajectory_q, dtype=float)
+
+    # First difference: joint step delta [deg]
+    steps = np.diff(q_arr, axis=0)
+    max_step = float(np.max(np.abs(steps)))
+
+    # Velocities [deg/s]
+    vel = steps / dt
+    per_joint_max_vel = [round(float(v), 2) for v in np.max(np.abs(vel), axis=0)]
+    max_vel = float(np.max(per_joint_max_vel))
+
+    # Accelerations [deg/s^2]
+    if n_points >= 3:
+        acc = np.diff(vel, axis=0) / dt
+        per_joint_max_acc = [round(float(a), 2) for a in np.max(np.abs(acc), axis=0)]
+        max_acc = float(np.max(per_joint_max_acc))
+    else:
+        per_joint_max_acc = [0.0] * 6
+        max_acc = 0.0
+
+    # Jerk [deg/s^3]
+    if n_points >= 4:
+        jerk = np.diff(acc, axis=0) / dt
+        per_joint_max_jerk = [round(float(j), 2) for j in np.max(np.abs(jerk), axis=0)]
+        max_jerk = float(np.max(per_joint_max_jerk))
+    else:
+        per_joint_max_jerk = [0.0] * 6
+        max_jerk = 0.0
+
+    # Manipulability profile
+    mu_min = 1.0
+    for q in trajectory_q[::max(1, n_points // 8)]:
+        mu = compute_manipulability(q)
+        if mu < mu_min:
+            mu_min = mu
+
+    stats = {
+        "duration_sec": round(duration_sec, 3),
+        "point_count": n_points,
+        "max_step_deg": round(max_step, 3),
+        "max_joint_vel_deg_s": round(max_vel, 2),
+        "max_joint_acc_deg_s2": round(max_acc, 2),
+        "max_joint_jerk_deg_s3": round(max_jerk, 2),
+        "per_joint_max_vel": per_joint_max_vel,
+        "per_joint_max_acc": per_joint_max_acc,
+        "per_joint_max_jerk": per_joint_max_jerk,
+        "manipulability_min": round(mu_min, 4),
+    }
+    stats["feasibility"] = eval_feasibility(stats)
+    return stats
+
+
+def eval_feasibility(kinematic_stats: dict) -> str:
+    """Classifies kinetic envelope feasibility: FEASIBLE, WARNING, or INFEASIBLE."""
+    max_step = kinematic_stats.get("max_step_deg", 0.0)
+    max_vel = kinematic_stats.get("max_joint_vel_deg_s", 0.0)
+    max_acc = kinematic_stats.get("max_joint_acc_deg_s2", 0.0)
+    mu_min = kinematic_stats.get("manipulability_min", 1.0)
+
+    # Discontinuity or severe singularity
+    if max_step > 15.0 or mu_min < 0.0005:
+        return "INFEASIBLE"
+
+    # Approaching hardware limit (Indy7 max continuous joint velocity is ~150 deg/s, peak ~180 deg/s)
+    if max_vel > 180.0 or max_acc > 450.0 or max_step > 12.0:
+        return "WARNING"
+
+    return "FEASIBLE"
+

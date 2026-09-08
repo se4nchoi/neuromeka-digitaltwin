@@ -127,6 +127,16 @@
           <span id="opText">OP_IDLE (5)</span>
         </div>
 
+        <!-- Work Order Active Badge -->
+        <div class="badge" id="woTopBadge" style="display: none; background: rgba(6, 182, 212, 0.15); border: 1px solid rgba(6, 182, 212, 0.4); color: #7dd3fc; font-family: var(--font-mono); font-size: 11px; align-items: center; gap: 6px;">
+          <span>📋</span> <span id="woTopText">WO: NONE</span>
+        </div>
+
+        <!-- Pallet Swap Alert Button -->
+        <button class="mode-toggle-btn" id="btnTopSwapPallet" style="display: none; background: #f59e0b; color: #000; font-weight: 800; border-color: #f59e0b; animation: swap-pulse 2s infinite;">
+          📦 SWAP PALLET
+        </button>
+
         <!-- Link to Dedicated Production & Log Analytics Console -->
         <a href="/production" class="btn-nav-page" title="Open Production &amp; Log Analytics Console">
           <span>📊</span> PRODUCTION ANALYTICS ↗
@@ -158,8 +168,10 @@
           </select>
           <div style="display: flex; flex-wrap: wrap; gap: 6px;">
             <button class="mode-toggle-btn" id="injectFault">Inject fault</button>
-            <button class="mode-toggle-btn" id="resetDemoCell">Reset simulated cell</button>
+            <button class="mode-toggle-btn" id="resetDemoCell" title="Reset pallet inventory &amp; refill feeder">Reset cell</button>
+            <button class="mode-toggle-btn" id="btnToggleSensor" title="Toggle feeder sensor (DI3)">Toggle Sensor (DI3)</button>
             <button class="mode-toggle-btn" id="recoverCell">Recover</button>
+            <button class="mode-toggle-btn" id="btnAutoRecoverFeeder" style="display: none; background: #f59e0b; color: #000; font-weight: 800; border-color: #f59e0b;">⚡ REFILL FEEDER &amp; RECOVER</button>
           </div>
           <p id="commandResult" role="status" style="font-size: 12px; margin-top: 8px; overflow-wrap: anywhere;">Ready for commands</p>
           <p style="font-size: 11px; opacity: .7; margin-top: 8px;">After recovery, start a new program; interrupted steps do not resume. Application stop is separate from physical safety equipment.</p>

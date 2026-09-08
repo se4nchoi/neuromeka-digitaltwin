@@ -959,7 +959,29 @@
     document.getElementById("btnPendantGripperClose").addEventListener("click", () => sendCmd("gripper", { close: true }));
     document.getElementById("btnPendantStopJog").addEventListener("click", () => sendCmd("jog_stop"));
 
-    // Jog Buttons (+/- Action)
+    // Jog Buttons (+/- Action) with smooth continuous hold support
+    let activeHoldTimeout = null;
+    let activeRepeatInterval = null;
+    let isHoldJogging = false;
+
+    const stopActiveHoldJog = () => {
+      if (activeHoldTimeout) {
+        clearTimeout(activeHoldTimeout);
+        activeHoldTimeout = null;
+      }
+      if (activeRepeatInterval) {
+        clearInterval(activeRepeatInterval);
+        activeRepeatInterval = null;
+      }
+      if (isHoldJogging) {
+        isHoldJogging = false;
+        sendCmd("jog_stop");
+      }
+    };
+
+    window.addEventListener("mouseup", stopActiveHoldJog);
+    window.addEventListener("blur", stopActiveHoldJog);
+
     document.querySelectorAll(".btn-jog").forEach(btn => {
       const executeJog = () => {
         const type = btn.dataset.type;
@@ -981,23 +1003,32 @@
         }
       };
 
-      btn.addEventListener("click", executeJog);
-
-      // Support continuous hold jog
-      btn.addEventListener("mousedown", () => {
-        if (continuousJogInterval) clearInterval(continuousJogInterval);
-        continuousJogInterval = setInterval(executeJog, 140);
-      });
-
-      const clearHold = () => {
-        if (continuousJogInterval) {
-          clearInterval(continuousJogInterval);
-          continuousJogInterval = null;
-          sendCmd("jog_stop");
+      const startHold = (e) => {
+        if (e.type === "touchstart") {
+          e.preventDefault();
         }
+        stopActiveHoldJog();
+
+        // 1. Immediately fire initial step for single-click / tap
+        executeJog();
+        isHoldJogging = false;
+
+        // 2. Begin repeating interval after 240ms of continuous holding
+        activeHoldTimeout = setTimeout(() => {
+          isHoldJogging = true;
+          activeRepeatInterval = setInterval(executeJog, 110);
+        }, 240);
       };
-      btn.addEventListener("mouseup", clearHold);
-      btn.addEventListener("mouseleave", clearHold);
+
+      const endHold = () => {
+        stopActiveHoldJog();
+      };
+
+      btn.addEventListener("mousedown", startHold);
+      btn.addEventListener("mouseleave", endHold);
+      btn.addEventListener("touchstart", startHold, { passive: false });
+      btn.addEventListener("touchend", endHold);
+      btn.addEventListener("touchcancel", endHold);
     });
 
     // 5. Tab 3: Waypoint Management & Mission Planner
@@ -1180,6 +1211,13 @@
       });
     }
 
+    const btnTopSwap = document.getElementById("btnTopSwapPallet");
+    if (btnTopSwap) {
+      btnTopSwap.addEventListener("click", () => {
+        sendCmd("swap_pallet");
+      });
+    }
+
     // Quick Jaw toggle & Trail clear
     const btnQuickGripper = document.getElementById("btnQuickGripper");
     if (btnQuickGripper) {
@@ -1294,6 +1332,30 @@
       opText.textContent = data.op_state_name || "OP_IDLE (5)";
     }
 
+    // Work Order Top Badge & Pallet Swap Alert
+    const woBadge = document.getElementById("woTopBadge");
+    const woText = document.getElementById("woTopText");
+    const btnSwap = document.getElementById("btnTopSwapPallet");
+
+    if (woBadge && woText) {
+      if (data.work_order) {
+        woBadge.style.display = "inline-flex";
+        const wo = data.work_order;
+        const palIdx = data.current_pallet_index || 1;
+        woText.textContent = `${wo.order_number}: ${wo.completed_quantity}/${wo.target_quantity} (P#${palIdx})`;
+      } else {
+        woBadge.style.display = "none";
+      }
+    }
+
+    if (btnSwap) {
+      if (data.pallet_change_required) {
+        btnSwap.style.display = "inline-block";
+      } else {
+        btnSwap.style.display = "none";
+      }
+    }
+
     // 3. Mode Toggle Button
     const btnMode = document.getElementById("btnToggleMode");
     if (btnMode) {
@@ -1397,7 +1459,18 @@
       if (ioStop) ioStop.className = `io-pill ${data.plc_io.stop ? "active-red" : ""}`;
       if (ioPb1) ioPb1.className = `io-pill ${data.plc_io.pb1 ? "active-green" : ""}`;
       if (ioPb2) ioPb2.className = `io-pill ${data.plc_io.pb2 ? "active-blue" : ""}`;
-      if (ioSensor) ioSensor.className = `io-pill ${data.plc_io.mag_sensor ? "active-green" : ""}`;
+      if (ioSensor) {
+        ioSensor.className = `io-pill ${data.plc_io.mag_sensor ? "active-green" : ""}`;
+        if (data.mode === "SIMULATION") {
+          ioSensor.style.cursor = "pointer";
+          ioSensor.title = "Click to toggle simulated feeder sensor (DI3)";
+          ioSensor.onclick = () => sendCmd("sensor");
+        } else {
+          ioSensor.style.cursor = "default";
+          ioSensor.title = "Physical feeder proximity sensor (DI3)";
+          ioSensor.onclick = null;
+        }
+      }
       if (ioDo0) ioDo0.className = `io-pill ${data.plc_io.do0_open ? "active-cyan" : ""}`;
       if (ioDo1) ioDo1.className = `io-pill ${data.plc_io.do1_close ? "active-green" : ""}`;
     }

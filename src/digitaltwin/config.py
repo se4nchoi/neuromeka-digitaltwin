@@ -53,3 +53,74 @@ TRANSIT_VEL_RATIO = 45
 TRANSIT_ACC_RATIO = 45
 ACTION_VEL_RATIO  = 25
 ACTION_ACC_RATIO  = 25
+
+# Pre-calibrated Default Recipes
+DEFAULT_RECIPES = {
+    "pallet-2x2x2-default": {
+        "recipe_id": "pallet-2x2x2-default",
+        "version": "1.0.0",
+        "name": "Standard Dual-Layer Pallet (2x2x2)",
+        "description": "Standard 8-slot palletizing across 2 layers (4 slots/floor) with calibrated approach.",
+        "parameters": {
+            "grid_x": 2,
+            "grid_y": 2,
+            "num_floors": 2,
+            "slots_per_floor": 4,
+            "total_slots": 8,
+            "offset_x": 80.0,
+            "offset_y": 80.0,
+            "layer_height": 30.0,
+            "approach_clearance_z": 100.0,
+            "transit_vel_ratio": 45,
+            "transit_acc_ratio": 45,
+            "action_vel_ratio": 25,
+            "action_acc_ratio": 25,
+            "gripper_dwell_sec": 0.5,
+        },
+    },
+    "pallet-2x2x1-single": {
+        "recipe_id": "pallet-2x2x1-single",
+        "version": "1.0.0",
+        "name": "Single-Layer Flat Pallet (2x2x1)",
+        "description": "Single-layer 4-slot layout for short production runs and quick batch validation.",
+        "parameters": {
+            "grid_x": 2,
+            "grid_y": 2,
+            "num_floors": 1,
+            "slots_per_floor": 4,
+            "total_slots": 4,
+            "offset_x": 80.0,
+            "offset_y": 80.0,
+            "layer_height": 30.0,
+            "approach_clearance_z": 100.0,
+            "transit_vel_ratio": 45,
+            "transit_acc_ratio": 45,
+            "action_vel_ratio": 25,
+            "action_acc_ratio": 25,
+            "gripper_dwell_sec": 0.5,
+        },
+    },
+    "pallet-high-speed": {
+        "recipe_id": "pallet-high-speed",
+        "version": "1.0.0",
+        "name": "High-Speed Dual-Layer (2x2x2)",
+        "description": "Accelerated motion profiles (vel: 70%, clearance: 70mm, dwell: 0.3s) for high throughput.",
+        "parameters": {
+            "grid_x": 2,
+            "grid_y": 2,
+            "num_floors": 2,
+            "slots_per_floor": 4,
+            "total_slots": 8,
+            "offset_x": 80.0,
+            "offset_y": 80.0,
+            "layer_height": 30.0,
+            "approach_clearance_z": 70.0,
+            "transit_vel_ratio": 70,
+            "transit_acc_ratio": 70,
+            "action_vel_ratio": 35,
+            "action_acc_ratio": 35,
+            "gripper_dwell_sec": 0.3,
+        },
+    },
+}
+

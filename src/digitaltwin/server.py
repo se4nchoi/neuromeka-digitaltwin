@@ -1,13 +1,13 @@
 import os
 import asyncio
 import json
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager, suppress
 from .commands import CommandService
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import SERVER_HOST, SERVER_PORT, TELEMETRY_HZ, DEFAULT_ROBOT_IP
 from .palletizer_engine import PalletizerEngine
@@ -85,6 +85,32 @@ class WaypointIdPayload(BaseModel):
 
 class SequencePayload(BaseModel):
     repeat_count: int = 1
+
+
+class CreateWorkOrderPayload(BaseModel):
+    recipe_id: str
+    target_quantity: int = Field(default=8, ge=1, le=1000)
+    notes: Optional[str] = ""
+    recipe_version: Optional[str] = None
+    order_id: Optional[str] = None
+    order_number: Optional[str] = None
+
+
+class CreateRecipePayload(BaseModel):
+    recipe_id: str
+    version: str
+    name: str
+    parameters: Dict[str, Any]
+    description: Optional[str] = ""
+
+
+class RunBenchmarkPayload(BaseModel):
+    name: Optional[str] = None
+    baseline_recipe_id: str = "pallet-2x2x2-default"
+    candidate_recipe_id: str = "pallet-high-speed"
+    trials: int = Field(default=5, ge=2, le=50)
+    fast_mode: bool = True
+
 
 
 # --- HTTP ENDPOINTS ---
@@ -352,6 +378,165 @@ async def get_production_timeline(limit: int = 30):
     return await asyncio.to_thread(engine.storage.get_state_timeline, limit=limit)
 
 
+# --- RECIPES ENDPOINTS ---
+@app.get("/api/recipes")
+async def list_recipes_endpoint():
+    return await asyncio.to_thread(engine.storage.list_recipes)
+
+
+@app.get("/api/recipes/{recipe_id}")
+async def get_recipe_endpoint(recipe_id: str, version: Optional[str] = None):
+    recipe = await asyncio.to_thread(engine.storage.get_recipe, recipe_id, version)
+    if recipe is None:
+        raise HTTPException(404, f"Recipe '{recipe_id}' not found")
+    return recipe
+
+
+@app.post("/api/recipes")
+async def create_recipe_endpoint(payload: CreateRecipePayload):
+    return await asyncio.to_thread(
+        engine.storage.create_or_update_recipe,
+        recipe_id=payload.recipe_id,
+        version=payload.version,
+        name=payload.name,
+        parameters=payload.parameters,
+        description=payload.description or "",
+    )
+
+
+# --- WORK ORDERS ENDPOINTS ---
+@app.get("/api/work-orders")
+async def list_work_orders_endpoint(limit: int = 50, offset: int = 0, status: Optional[str] = None):
+    return await asyncio.to_thread(engine.storage.list_work_orders, limit=limit, offset=offset, status=status)
+
+
+@app.post("/api/work-orders")
+async def create_work_order_endpoint(payload: CreateWorkOrderPayload):
+    try:
+        return await asyncio.to_thread(
+            engine.storage.create_work_order,
+            recipe_id=payload.recipe_id,
+            target_quantity=payload.target_quantity,
+            notes=payload.notes or "",
+            recipe_version=payload.recipe_version,
+            order_id=payload.order_id,
+            order_number=payload.order_number,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/work-orders/{order_id}")
+async def get_work_order_endpoint(order_id: str):
+    wo = await asyncio.to_thread(engine.storage.get_work_order, order_id)
+    if wo is None:
+        raise HTTPException(404, f"Work order '{order_id}' not found")
+    return wo
+
+
+@app.post("/api/work-orders/{order_id}/start")
+async def start_work_order_endpoint(order_id: str):
+    res = await asyncio.to_thread(engine.start_work_order, order_id)
+    if not res.get("success"):
+        raise HTTPException(400, res.get("message", "Failed to start work order"))
+    return res
+
+
+@app.post("/api/work-orders/{order_id}/swap-pallet")
+async def swap_work_order_pallet_endpoint(order_id: str):
+    res = await asyncio.to_thread(engine.confirm_pallet_swap)
+    return res
+
+
+@app.post("/api/work-orders/{order_id}/cancel")
+async def cancel_work_order_endpoint(order_id: str):
+    res = await asyncio.to_thread(engine.cancel_active_work_order)
+    return res
+
+
+@app.get("/api/work-orders/{order_id}/summary")
+async def get_work_order_summary_endpoint(order_id: str):
+    summary = await asyncio.to_thread(engine.storage.get_work_order_summary, order_id)
+    if summary is None:
+        raise HTTPException(404, f"Work order '{order_id}' not found")
+    return summary
+
+
+@app.get("/api/work-orders/{order_id}/replay")
+async def get_work_order_replay_endpoint(order_id: str):
+    replay = await asyncio.to_thread(engine.storage.get_work_order_replay, order_id)
+    if replay is None:
+        raise HTTPException(404, f"Work order '{order_id}' not found")
+    return replay
+
+
+@app.get("/api/work-orders/{order_id}/parts")
+async def get_work_order_parts_endpoint(order_id: str):
+    return await asyncio.to_thread(engine.storage.get_order_workpieces, order_id)
+
+
+@app.post("/api/pallet/swap")
+async def swap_current_pallet_endpoint():
+    return await asyncio.to_thread(engine.confirm_pallet_swap)
+
+
+# --- BENCHMARK & OPTIMIZATION ENDPOINTS ---
+@app.post("/api/benchmarks/run")
+async def run_benchmark_endpoint(payload: RunBenchmarkPayload):
+    try:
+        return await asyncio.to_thread(
+            engine.run_benchmark_experiment,
+            name=payload.name,
+            baseline_recipe_id=payload.baseline_recipe_id,
+            candidate_recipe_id=payload.candidate_recipe_id,
+            trials=payload.trials,
+            fast_mode=payload.fast_mode,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/benchmarks")
+async def list_benchmarks_endpoint(limit: int = 50):
+    return await asyncio.to_thread(engine.storage.list_benchmarks, limit=limit)
+
+
+@app.get("/api/benchmarks/{benchmark_id}")
+async def get_benchmark_endpoint(benchmark_id: str):
+    benchmark = await asyncio.to_thread(engine.storage.get_benchmark, benchmark_id)
+    if benchmark is None:
+        raise HTTPException(404, f"Benchmark '{benchmark_id}' not found")
+    return benchmark
+
+
+@app.delete("/api/benchmarks/{benchmark_id}")
+async def delete_benchmark_endpoint(benchmark_id: str):
+    success = await asyncio.to_thread(engine.storage.delete_benchmark, benchmark_id)
+    if not success:
+        raise HTTPException(404, f"Benchmark '{benchmark_id}' not found")
+    return {"success": True, "benchmark_id": benchmark_id}
+
+
+@app.get("/api/benchmarks/compare")
+async def compare_recipes_endpoint(
+    base: str = "pallet-2x2x2-default",
+    cand: str = "pallet-high-speed",
+    trials: int = 5
+):
+    try:
+        return await asyncio.to_thread(
+            engine.run_benchmark_experiment,
+            name=f"Comparison: {base} vs {cand}",
+            baseline_recipe_id=base,
+            candidate_recipe_id=cand,
+            trials=trials,
+            fast_mode=True,
+        )
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "mode": engine.mode, "workcell_state": engine.workcell_state}
+

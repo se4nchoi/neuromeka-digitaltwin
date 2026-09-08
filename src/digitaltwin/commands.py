@@ -12,7 +12,8 @@ class Command(BaseModel):
     cmd: Literal["pb1", "pb2", "home", "zero", "recover", "stop", "sensor",
                  "reconnect", "connect", "disconnect", "simulation", "jog_joint",
                  "jog_task", "jog_stop", "direct_teaching", "gripper", "goto_wp",
-                 "start_sequence", "stop_sequence", "speed", "reset_pallet", "inject_fault"]
+                 "start_sequence", "stop_sequence", "speed", "reset_pallet", "inject_fault",
+                 "swap_pallet", "cancel_order"]
     active: bool = True
     joint_idx: int = Field(default=0, ge=0, le=5)
     step_deg: float = Field(default=0, ge=-180, le=180)
@@ -41,11 +42,13 @@ class CommandService:
         try:
             p = Command(cmd=cmd, **payload)
             with e.lock:
-                busy = e.sequence_running or e.is_moving or (e.active_thread and e.active_thread.is_alive())
-                interrupt = cmd in {"stop", "stop_sequence", "jog_stop", "inject_fault"}
+                is_jog_cmd = cmd in {"jog_joint", "jog_task"}
+                is_jogging = getattr(e, "is_jogging", False)
+                busy = e.sequence_running or (e.is_moving and not is_jogging) or (e.active_thread and e.active_thread.is_alive() and not is_jog_cmd)
+                interrupt = cmd in {"stop", "stop_sequence", "jog_stop", "inject_fault", "cancel_order"}
                 if busy and not interrupt:
                     raise ValueError("Cell is busy; stop the active operation first")
-                resolution = {"recover", "sensor", "reset_pallet", "connect", "reconnect", "disconnect", "simulation"}
+                resolution = {"recover", "sensor", "reset_pallet", "connect", "reconnect", "disconnect", "simulation", "swap_pallet", "cancel_order"}
                 if (e.fault or e.stop_active or e.abort_requested) and not interrupt and cmd not in resolution:
                     raise ValueError("Cell requires recovery before another command")
                 if e.mode == "DISCONNECTED" and cmd not in resolution and not interrupt:
@@ -70,18 +73,28 @@ class CommandService:
                     "sensor": lambda: setattr(e, "mag_sensor", not e.mag_sensor),
                     "inject_fault": lambda: e.inject_fault(p.code),
                     "reset_pallet": self.reset_cell,
+                    "swap_pallet": e.confirm_pallet_swap,
+                    "cancel_order": e.cancel_active_work_order,
                 }
                 result = handlers[cmd]()
+
                 if cmd in {"speed", "inject_fault", "sensor", "reset_pallet", "direct_teaching", "gripper"}:
                     try:
                         e.storage.record_operator_action(cmd.upper(), payload)
                     except Exception:
                         pass
-                if isinstance(result, dict) and "command_id" in result:
-                    e.commands[-1]["cmd"] = cmd
-                    return {**result, "cmd": cmd}
-                record.update(status="completed" if result is not False else "rejected",
-                              success=result is not False, message=e.status_msg)
+                if isinstance(result, dict):
+                    if "command_id" in result:
+                        e.commands[-1]["cmd"] = cmd
+                        return {**result, "cmd": cmd}
+                    record.update(
+                        status=result.get("status", "completed" if result.get("success", True) else "rejected"),
+                        success=result.get("success", True),
+                        message=result.get("message", e.status_msg)
+                    )
+                else:
+                    record.update(status="completed" if result is not False else "rejected",
+                                  success=result is not False, message=e.status_msg)
         except (ValidationError, ValueError) as exc:
             record.update(status="rejected", success=False, message=str(exc))
         except Exception:

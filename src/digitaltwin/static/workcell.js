@@ -28,13 +28,28 @@
       ? `${fault.code}: ${fault.message}. Interrupted step: ${fault.step}. ${fault.recovery}`
       : 'No active fault';
     if (fault) byId('workcellDiagnostics').open = true;
+    const btnAuto = byId('btnAutoRecoverFeeder');
+    if (btnAuto) {
+      btnAuto.style.display = (fault && fault.code === 'FEEDER_EMPTY') ? 'inline-block' : 'none';
+    }
     byId('injectFault').disabled = data.mode !== 'SIMULATION' || Boolean(fault);
     byId('resetDemoCell').disabled = data.mode !== 'SIMULATION' || data.workcell_state === 'RUNNING';
+    const btnSensor = byId('btnToggleSensor');
+    if (btnSensor) btnSensor.disabled = data.mode !== 'SIMULATION';
     if (data.last_command) result(data.last_command);
   });
   byId('injectFault').onclick = () => send('inject_fault', { code: byId('faultCode').value });
   byId('resetDemoCell').onclick = () => send('reset_pallet');
   byId('recoverCell').onclick = () => send('recover');
+  const btnToggleSensor = byId('btnToggleSensor');
+  if (btnToggleSensor) btnToggleSensor.onclick = () => send('sensor');
+  const btnAutoRec = byId('btnAutoRecoverFeeder');
+  if (btnAutoRec) {
+    btnAutoRec.onclick = async () => {
+      await send('sensor');
+      await send('recover');
+    };
+  }
   setInterval(() => {
     if (Date.now() - lastPacketAt > 3000) {
       online = false;
@@ -43,6 +58,7 @@
     if (!online) {
       byId('injectFault').disabled = true;
       byId('resetDemoCell').disabled = true;
+      if (byId('btnToggleSensor')) byId('btnToggleSensor').disabled = true;
     }
   }, 1000);
 })();

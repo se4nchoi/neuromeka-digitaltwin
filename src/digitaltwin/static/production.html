@@ -29,6 +29,27 @@
     </div>
   </div>
 
+  <!-- WORK ORDER SUMMARY MODAL DIALOG -->
+  <div id="modalOrderSummary" class="modal-overlay" style="display: none;">
+    <div class="modal-card modal-card-large">
+      <div class="modal-header">
+        <div>
+          <span class="modal-title">📋 WORK ORDER PRODUCTION SUMMARY</span>
+          <div class="modal-subtitle" id="modalOrderSubtitle">Order: -</div>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn-ctrl" id="btnExportOrderCsv" title="Export parts traceability to CSV">📥 CSV</button>
+          <button class="btn-ctrl" id="btnExportOrderJson" title="Export full summary to JSON">📥 JSON</button>
+          <button class="btn-modal-close" id="btnCloseOrderModal">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" id="modalOrderBody">
+        <!-- Dynamically populated with summary cards, pallet list, and part traceability -->
+      </div>
+    </div>
+  </div>
+
+
   <div class="app-layout">
 
     <!-- TOP HEADER -->
@@ -145,8 +166,299 @@
         </div>
       </section>
 
-      <!-- SECTION 2: DUAL ANALYTICS PANELS (STEP BREAKDOWN & DOWNTIME PARETO) -->
+      <!-- SECTION 2: WORK ORDER & RECIPE WORKFLOW -->
+      <section class="section-work-orders">
+        <div class="dual-grid">
+
+          <!-- Card A: Active Work Order & Pallet Control -->
+          <div class="panel panel-wo-active">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">ACTIVE WORK ORDER &amp; PALLET CONTROL</div>
+                <div class="panel-desc">Real-time batch progress, slot assignment, and pallet swap state</div>
+              </div>
+              <div id="woActiveBadge" class="status-pill pill-neutral">NO ACTIVE ORDER</div>
+            </div>
+
+            <!-- Active Order Content -->
+            <div id="woActiveContainer">
+              <div class="wo-empty-state">
+                <span class="wo-empty-icon">📋</span>
+                <div class="wo-empty-text">No active work order executing. Select a recipe below to launch an order.</div>
+              </div>
+            </div>
+
+            <!-- Pallet Swap Alert Banner (Shown when pallet_change_required) -->
+            <div id="bannerPalletSwap" class="banner-pallet-swap" style="display: none;">
+              <div class="banner-swap-content">
+                <span class="banner-swap-icon">⚠️</span>
+                <div>
+                  <div class="banner-swap-title">PALLET FULL — SWAP REQUIRED TO CONTINUE</div>
+                  <div class="banner-swap-desc" id="bannerPalletSwapDesc">Current pallet is at full capacity. Swap pallet to place remaining parts.</div>
+                </div>
+              </div>
+              <button id="btnActionSwapPallet" class="btn-primary-action btn-swap-pulse">
+                <span>📦</span> SWAP PALLET &amp; CONTINUE
+              </button>
+            </div>
+          </div>
+
+          <!-- Card B: Create New Work Order -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">CREATE WORK ORDER</div>
+                <div class="panel-desc">Configure target quantity with an immutable recipe snapshot</div>
+              </div>
+            </div>
+
+            <form id="formCreateWorkOrder" class="form-work-order" onsubmit="return false;">
+              <div class="form-row">
+                <div class="form-field flex-2">
+                  <label for="selOrderRecipe">VERSIONED RECIPE</label>
+                  <select id="selOrderRecipe" class="ctrl-select-lg">
+                    <!-- Populated dynamically from /api/recipes -->
+                  </select>
+                </div>
+                <div class="form-field flex-1">
+                  <label for="inpOrderTarget">TARGET QUANTITY</label>
+                  <input type="number" id="inpOrderTarget" class="ctrl-input-lg" value="8" min="1" max="1000" step="1" required>
+                </div>
+              </div>
+
+              <!-- Quick Presets -->
+              <div class="preset-group">
+                <span class="preset-label">PRESETS:</span>
+                <button type="button" class="btn-preset" data-qty="4">4 Parts (1-Layer)</button>
+                <button type="button" class="btn-preset active" data-qty="8">8 Parts (1 Pallet)</button>
+                <button type="button" class="btn-preset" data-qty="12">12 Parts (2 Pallets)</button>
+                <button type="button" class="btn-preset" data-qty="16">16 Parts (2 Pallets)</button>
+              </div>
+
+              <div class="form-field" style="margin-top: 8px;">
+                <label for="inpOrderNotes">BATCH NOTES (OPTIONAL)</label>
+                <input type="text" id="inpOrderNotes" class="ctrl-input-lg" placeholder="e.g. Production Batch A2-Standard">
+              </div>
+
+              <div class="form-actions" style="margin-top: 12px;">
+                <button type="button" id="btnSubmitCreateOrder" class="btn-primary-action">
+                  <span>🚀</span> CREATE &amp; START ORDER
+                </button>
+              </div>
+            </form>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- SECTION 2.5: RECENT WORK ORDERS TABLE -->
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">PRODUCTION WORK ORDERS</div>
+            <div class="panel-desc">Traceable batch orders with immutable recipe snapshots and part records</div>
+          </div>
+          <button class="btn-ctrl" id="btnRefreshOrders" title="Refresh orders list">
+            <span>🔄</span> REFRESH ORDERS
+          </button>
+        </div>
+
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ORDER #</th>
+                <th>RECIPE</th>
+                <th>PROGRESS</th>
+                <th>PALLETS</th>
+                <th>STATUS</th>
+                <th>CREATED AT (UTC)</th>
+                <th>COMPLETED AT (UTC)</th>
+                <th style="text-align: right;">ACTION</th>
+              </tr>
+            </thead>
+            <tbody id="workOrdersTableBody">
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- SECTION 2.8: CYCLE TIME OPTIMIZATION & VARIANT BENCHMARKING -->
+      <section class="panel panel-benchmarking">
+        <div class="panel-header">
+          <div>
+            <div class="panel-title">⚡ CYCLE TIME OPTIMIZATION &amp; VARIANT BENCHMARKING</div>
+            <div class="panel-desc">Hypothesis testing, 95% confidence intervals, kinematic feasibility, and step delta analysis</div>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button class="btn-ctrl" id="btnRefreshBenchmarks" title="Refresh benchmarks list">
+              <span>🔄</span> REFRESH
+            </button>
+            <span class="recipe-badge" id="benchStatusBadge">READY</span>
+          </div>
+        </div>
+
+        <!-- Benchmark Configuration Controls Bar -->
+        <div class="benchmark-ctrl-bar">
+          <div class="bench-ctrl-group">
+            <label for="selBenchBaseRecipe">BASELINE RECIPE:</label>
+            <select id="selBenchBaseRecipe" class="ctrl-select-lg">
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+
+          <div class="bench-arrow-divider">➔</div>
+
+          <div class="bench-ctrl-group">
+            <label for="selBenchCandRecipe">CANDIDATE / OPTIMIZED RECIPE:</label>
+            <select id="selBenchCandRecipe" class="ctrl-select-lg">
+              <!-- Populated dynamically -->
+            </select>
+          </div>
+
+          <div class="bench-ctrl-group" style="max-width: 140px;">
+            <label for="inpBenchTrials">TRIALS:</label>
+            <select id="inpBenchTrials" class="ctrl-select-lg">
+              <option value="3">3 Trials</option>
+              <option value="5" selected>5 Trials (Std)</option>
+              <option value="10">10 Trials</option>
+              <option value="20">20 Trials</option>
+            </select>
+          </div>
+
+          <div class="bench-actions">
+            <button type="button" id="btnRunBenchmark" class="btn-primary-action btn-bench-run">
+              <span id="benchRunIcon">⚡</span> <span id="benchRunText">RUN BENCHMARK EXPERIMENT</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Active Benchmark Results Area -->
+        <div id="benchmarkResultsArea">
+          <!-- 4 Executive Comparison Metric Cards -->
+          <div class="bench-kpi-grid">
+            <div class="bench-card card-bench-times">
+              <div class="bench-card-label">CYCLE TIME COMPARISON (MEAN &plusmn; &sigma;)</div>
+              <div class="bench-split-values">
+                <div class="bench-split-col">
+                  <div class="split-label">BASELINE:</div>
+                  <div class="split-val" id="benchBaseMean">-- s</div>
+                  <div class="split-sub" id="benchBaseSub">P95: -- s</div>
+                </div>
+                <div class="bench-split-divider">vs</div>
+                <div class="bench-split-col highlight-green">
+                  <div class="split-label">OPTIMIZED:</div>
+                  <div class="split-val" id="benchCandMean">-- s</div>
+                  <div class="split-sub" id="benchCandSub">P95: -- s</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="bench-card card-bench-delta">
+              <div class="bench-card-label">NET CYCLE TIME REDUCTION (&Delta;T)</div>
+              <div class="bench-metric-row">
+                <div class="bench-val-lg" id="benchDeltaVal">-- s</div>
+                <div class="bench-delta-pill" id="benchSavingsPill">--%</div>
+              </div>
+              <div class="bench-sub-text" id="benchThroughputUplift">Throughput uplift: -- parts/hr</div>
+            </div>
+
+            <div class="bench-card card-bench-stat">
+              <div class="bench-card-label">95% CONFIDENCE INTERVAL &amp; SIGNIFICANCE</div>
+              <div class="bench-val-md" id="benchCiVal">[--, --] s</div>
+              <div class="bench-stat-sub">
+                <span id="benchSignificanceBadge" class="status-pill pill-neutral">TEST: N/A</span>
+                <span id="benchPValueText" class="bench-pval">p = --</span>
+              </div>
+            </div>
+
+            <div class="bench-card card-bench-kin">
+              <div class="bench-card-label">KINEMATIC ENVELOPE &amp; FEASIBILITY</div>
+              <div class="bench-metric-row">
+                <div class="bench-val-lg" id="benchFeasibilityBadge">--</div>
+              </div>
+              <div class="bench-sub-text" id="benchJerkStats">Peak Jerk: -- &bull; Max Step: --</div>
+            </div>
+          </div>
+
+          <!-- Step-by-Step Delta Breakdown & Kinematic Comparison Grid -->
+          <div class="dual-grid" style="margin-top: 16px;">
+            <!-- Column A: Step Delta Comparison Bars -->
+            <div class="panel" style="background: rgba(18, 22, 34, 0.6);">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title" style="font-size: 0.95rem;">STEP-LEVEL TIME SAVINGS BREAKDOWN</div>
+                  <div class="panel-desc">Where seconds are saved across the 8 process phases</div>
+                </div>
+              </div>
+              <div class="step-delta-container" id="benchStepDeltaContainer">
+                <div class="empty-hint">Run or select a benchmark to view step-level delta distribution.</div>
+              </div>
+            </div>
+
+            <!-- Column B: Kinematic Trade-Off Envelope Table -->
+            <div class="panel" style="background: rgba(18, 22, 34, 0.6);">
+              <div class="panel-header">
+                <div>
+                  <div class="panel-title" style="font-size: 0.95rem;">KINEMATIC LIMITS &amp; JERK TRADE-OFFS</div>
+                  <div class="panel-desc">Joint velocity, acceleration, jerk, and singularity margins</div>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table" style="font-size: 0.85rem;">
+                  <thead>
+                    <tr>
+                      <th>METRIC</th>
+                      <th>BASELINE</th>
+                      <th>OPTIMIZED</th>
+                      <th>SAFETY LIMIT</th>
+                      <th>MARGIN</th>
+                    </tr>
+                  </thead>
+                  <tbody id="benchKinematicsTableBody">
+                    <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No benchmark selected</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Historical Benchmarks Log Table -->
+        <div style="margin-top: 20px;">
+          <div class="panel-subtitle-bar">
+            <span class="panel-subtitle-text">HISTORICAL BENCHMARK EXPERIMENTS</span>
+            <span class="text-muted" style="font-size: 0.78rem;">Saved comparison trials and audit records in SQLite</span>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>EXPERIMENT NAME</th>
+                  <th>BASELINE</th>
+                  <th>OPTIMIZED</th>
+                  <th>TRIALS</th>
+                  <th>&Delta; CYCLE TIME</th>
+                  <th>SAVINGS</th>
+                  <th>p-VALUE</th>
+                  <th>FEASIBILITY</th>
+                  <th>DATE (UTC)</th>
+                  <th style="text-align: right;">ACTION</th>
+                </tr>
+              </thead>
+              <tbody id="benchmarksTableBody">
+                <tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 18px;">Loading benchmark experiments...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- SECTION 3: DUAL ANALYTICS PANELS (STEP BREAKDOWN & DOWNTIME PARETO) -->
       <section class="dual-grid">
+
 
         <!-- Column A: Process Step Breakdown -->
         <div class="panel">

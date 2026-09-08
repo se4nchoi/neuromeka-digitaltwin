@@ -18,7 +18,7 @@ import uuid
 from .drivers import HardwareDriver, SimulationDriver
 from .storage import ProductionStorage
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from .config import (
     DEFAULT_DB_PATH,
     DEFAULT_RECIPE_ID,
@@ -30,6 +30,7 @@ from .config import (
     MAGAZINE_INSERT_LOCATION,
     HOME_JPOS,
     GRID_X,
+    GRID_Y,
     SLOTS_PER_FLOOR,
     NUM_FLOORS,
     TOTAL_MAX_ITEMS,
@@ -139,6 +140,16 @@ class PalletizerEngine:
         self.active_cycle_id: Optional[str] = None
         self.current_command_id: Optional[str] = None
 
+        # Work Order & Recipe Workflow
+        self.active_order_id: Optional[str] = None
+        self.active_order_number: Optional[str] = None
+        self.active_order_snapshot: Optional[Dict[str, Any]] = None
+        self.order_target_quantity: int = TOTAL_MAX_ITEMS
+        self.order_completed_quantity: int = 0
+        self.current_pallet_index: int = 1
+        self.pallet_change_required: bool = False
+
+
         self.robot_ip = DEFAULT_ROBOT_IP
         self.indy: Optional[IndyDCP3] = None
         self.hardware_connected = False
@@ -191,6 +202,9 @@ class PalletizerEngine:
         self.active_thread: Optional[threading.Thread] = None
         self.abort_requested = False
         self.running = True
+
+        # Jogging controls
+        self.is_jogging: bool = False
 
         # Telemetry Hz diagnostics
         self.telemetry_hz_actual = 0.0
@@ -326,8 +340,9 @@ class PalletizerEngine:
                 return False
             self.sequence_running = True
             cmd_id = self.current_command_id or str(uuid.uuid4())
-            self.current_command_id = cmd_id
+            self.current_command_id = None
             self.active_run_id = cmd_id
+
             command = {"command_id": cmd_id, "status": "accepted",
                        "success": True, "submitted_at": time.time()}
             self.commands.append(command)
@@ -358,6 +373,60 @@ class PalletizerEngine:
             self.active_thread = threading.Thread(target=run, daemon=True)
             self.active_thread.start()
             return response
+
+    def _launch_jog(self, worker, step_name: str = ""):
+        """Executes a jog step smoothly without latching program failures or blocking rapid hold ticks."""
+        with self.lock:
+            if self.fault or self.stop_active:
+                self.status_msg = "Jog rejected: cell is faulted or stopped"
+                return {"status": "rejected", "success": False, "message": self.status_msg}
+            if self.sequence_running:
+                self.status_msg = "Jog rejected: automated sequence is running"
+                return {"status": "rejected", "success": False, "message": self.status_msg}
+
+        # If previous jog step is active, wait briefly for it to settle smoothly
+        t0 = time.time()
+        while self.is_jogging and self.active_thread and self.active_thread.is_alive():
+            if time.time() - t0 > 0.12:
+                break
+            time.sleep(0.01)
+
+        cmd_id = self.current_command_id or str(uuid.uuid4())
+        self.current_command_id = None
+
+        command = {"command_id": cmd_id, "status": "accepted",
+                   "success": True, "submitted_at": time.time()}
+        with self.lock:
+            self.is_jogging = True
+            self.is_moving = True
+            self.status_msg = step_name
+            self.op_state = 6
+            self.op_state_name = "OP_MOVING (6)"
+            self.commands.append(command)
+            self.commands[:] = self.commands[-100:]
+        response = dict(command)
+
+        def run():
+            with self.lock:
+                command.update(status="running", started_at=time.time())
+            try:
+                worker()
+            except Exception as e:
+                logging.getLogger(__name__).warning("Jog error: %s", e)
+            finally:
+                with self.lock:
+                    status = "failed" if self.fault else "cancelled" if self.stop_active else "completed"
+                    command.update(status=status, success=(status == "completed"),
+                                   finished_at=time.time(), message=self.status_msg)
+                    self.is_moving = False
+                    self.is_jogging = False
+                    if not (self.fault or self.stop_active):
+                        self.op_state = 5
+                        self.op_state_name = "OP_IDLE (5)"
+
+        self.active_thread = threading.Thread(target=run, daemon=True)
+        self.active_thread.start()
+        return response
 
     def _init_slots(self) -> List[Dict]:
         from .kinematics import get_approach_pose
@@ -588,11 +657,21 @@ class PalletizerEngine:
     # =========================================================================
     # TEACH PENDANT CONTROLS (JOGGING & TOOLS)
     # =========================================================================
-    def jog_joint(self, joint_idx: int, step_deg: float, vel_ratio: Optional[int] = None) -> bool:
-        """Jogs a single joint incrementally (+/- step_deg)."""
+    def jog_joint(self, joint_idx: int, step_deg: float, vel_ratio: Optional[int] = None) -> Any:
+        """Jogs a single joint incrementally (+/- step_deg) with limit clamping and smooth interpolation."""
         vel = vel_ratio or self.speed_ratio
         if not (0 <= joint_idx <= 5):
-            return False
+            return {"status": "rejected", "success": False, "message": "Invalid joint index"}
+
+        joint_limits = [
+            (-175.0, 175.0),
+            (-175.0, 175.0),
+            (-175.0, 175.0),
+            (-175.0, 175.0),
+            (-175.0, 175.0),
+            (-215.0, 215.0),
+        ]
+        min_lim, max_lim = joint_limits[joint_idx]
 
         with self.lock:
             if self.hardware_connected and self.indy:
@@ -607,23 +686,32 @@ class PalletizerEngine:
                         teaching_mode=True
                     )
                     self.status_msg = f"Jog J{joint_idx+1}: {step_deg:+.1f}°"
-                    return True
+                    return {"status": "accepted", "success": True, "message": self.status_msg}
                 except Exception as e:
                     self.status_msg = f"Jog J{joint_idx+1} Error: {e}"
-                    return False
+                    return {"status": "rejected", "success": False, "message": self.status_msg}
             else:
-                # Simulation Jog
-                self.q[joint_idx] = round(self.q[joint_idx] + step_deg, 2)
-                self.p = forward_kinematics_craig(self.q)
-                self.status_msg = f"[SIM] Jog J{joint_idx+1} -> {self.q[joint_idx]}°"
-                return True
+                # Simulation Jog with limit protection and smooth interpolation
+                cur_val = self.q[joint_idx]
+                target_val = round(cur_val + step_deg, 2)
+                if target_val < min_lim or target_val > max_lim:
+                    target_val = max(min_lim, min(max_lim, target_val))
+                    if abs(target_val - cur_val) < 0.01:
+                        self.status_msg = f"Jog J{joint_idx+1} limit reached ({target_val:+.1f}°)"
+                        return {"status": "rejected", "success": False, "message": self.status_msg}
 
-    def jog_task(self, axis: str, step_val: float, vel_ratio: Optional[int] = None) -> bool:
+                target_q = list(self.q)
+                target_q[joint_idx] = target_val
+                step_name = f"[SIM] Jog J{joint_idx+1} -> {target_val:+.1f}°"
+
+        return self._launch_jog(lambda: self._sim_move(target_q, 0.10, step_name), step_name)
+
+    def jog_task(self, axis: str, step_val: float, vel_ratio: Optional[int] = None) -> Any:
         """Jogs the TCP in Cartesian coordinates along axis ('x', 'y', 'z', 'u', 'v', 'w')."""
         axis_map = {"x": 0, "y": 1, "z": 2, "u": 3, "v": 4, "w": 5}
         ax = axis.lower()
         if ax not in axis_map:
-            return False
+            return {"status": "rejected", "success": False, "message": f"Invalid axis: {axis}"}
         idx = axis_map[ax]
         vel = vel_ratio or self.speed_ratio
 
@@ -641,27 +729,39 @@ class PalletizerEngine:
                     )
                     unit = "mm" if idx < 3 else "°"
                     self.status_msg = f"Jog {ax.upper()}: {step_val:+.1f}{unit}"
-                    return True
+                    return {"status": "accepted", "success": True, "message": self.status_msg}
                 except Exception as e:
                     self.status_msg = f"Jog {ax.upper()} Error: {e}"
-                    return False
+                    return {"status": "rejected", "success": False, "message": self.status_msg}
             else:
                 target = list(self.p)
-                target[idx] += step_val
-                return self._launch_program(lambda: self._sim_cartesian_move(
-                    target, 0.3, f"[SIM] Jog {ax.upper()}: {step_val:+.1f}"))
+                target[idx] = round(target[idx] + step_val, 2)
+                unit = "mm" if idx < 3 else "°"
+                step_name = f"[SIM] Jog {ax.upper()}: {step_val:+.1f}{unit}"
+
+        return self._launch_jog(lambda: self._sim_cartesian_move(
+            target, 0.10, step_name), step_name)
 
     def stop_jog(self):
-        """Immediately halts jogging."""
+        """Immediately halts jogging without latching an emergency fault or requiring recovery."""
         with self.lock:
-            if self.mode == "SIMULATION" and self.sequence_running:
-                self.abort_requested = True
+            self.is_jogging = False
+            self.is_moving = False
+            if not (self.fault or self.stop_active):
+                self.abort_requested = False
+                self.op_state = 5
+                self.op_state_name = "OP_IDLE (5)"
             if self.hardware_connected and self.indy:
                 try:
                     self.indy.stop_motion(StopCategory.CAT0)
                 except Exception:
                     pass
             self.status_msg = "Jog Stopped"
+
+        if self.active_thread and self.active_thread.is_alive():
+            self.active_thread.join(timeout=0.20)
+
+        return {"status": "completed", "success": True, "message": "Jog Stopped"}
 
     def set_direct_teaching(self, enable: bool) -> bool:
         """Enables/disables physical Zero-G direct teaching."""
@@ -726,8 +826,8 @@ class PalletizerEngine:
             if self.held_workpiece:
                 self.status_msg = "Reconcile the held workpiece before recovery (reset the simulated cell)"
                 return False
-            if self.fault and self.fault["code"] == "FEEDER_EMPTY" and not self.mag_sensor:
-                self.status_msg = "Restore feeder sensor before recovery"
+            if self.mode == "SIMULATION" and self.fault and self.fault["code"] == "FEEDER_EMPTY" and not self.mag_sensor:
+                self.status_msg = "Restore feeder sensor before recovery (click 'Refill Feeder' or 'Reset Cell')"
                 return False
             if self.mode == "DISCONNECTED":
                 self.status_msg = "Reconnect equipment before recovery"
@@ -867,21 +967,78 @@ class PalletizerEngine:
         self.raise_fault("MOTION_TIMEOUT", "Robot motion did not complete before timeout")
         return False
 
-    def get_pallet_slot_pose(self, index: int) -> List[float]:
-        """Computes target pose for item `index` (0 to 7) matching palletizing_with_plc.py."""
-        layer = index // SLOTS_PER_FLOOR
-        slot_in_layer = index % SLOTS_PER_FLOOR
-        row = slot_in_layer // GRID_X
-        col = slot_in_layer % GRID_X
+    def get_pallet_slot_pose(self, index: int, recipe_params: Optional[Dict[str, Any]] = None) -> List[float]:
+        """Computes target pose for item `index` matching pallet recipe geometry."""
+        params = recipe_params or self.active_order_snapshot or {}
+        grid_x = params.get("grid_x", GRID_X)
+        grid_y = params.get("grid_y", GRID_Y)
+        slots_per_floor = params.get("slots_per_floor", grid_x * grid_y)
+        offset_x = params.get("offset_x", OFFSET_X)
+        offset_y = params.get("offset_y", OFFSET_Y)
+        layer_height = params.get("layer_height", LAYER_HEIGHT)
+
+        layer = index // slots_per_floor
+        slot_in_layer = index % slots_per_floor
+        row = slot_in_layer // grid_x
+        col = slot_in_layer % grid_x
 
         base_x, base_y, base_z = DROP_BASE_LOCATION[0], DROP_BASE_LOCATION[1], DROP_BASE_LOCATION[2]
         rot = DROP_BASE_LOCATION[3:]
 
-        x = base_x - (row * OFFSET_X)
-        y = base_y + (col * OFFSET_Y)
-        z = base_z + (layer * LAYER_HEIGHT)
+        x = base_x - (row * offset_x)
+        y = base_y + (col * offset_y)
+        z = base_z + (layer * layer_height)
 
         return [round(x, 2), round(y, 2), round(z, 2), *rot]
+
+    def _reconfigure_slots_from_recipe(self, params: Optional[Dict[str, Any]] = None) -> None:
+        """Reconfigures virtual pallet slots to match the specified recipe parameters."""
+        if not params:
+            return
+        from .kinematics import get_approach_pose
+        grid_x = params.get("grid_x", GRID_X)
+        grid_y = params.get("grid_y", GRID_Y)
+        num_floors = params.get("num_floors", NUM_FLOORS)
+        slots_per_floor = grid_x * grid_y
+        total_slots = params.get("total_slots", slots_per_floor * num_floors)
+        offset_x = params.get("offset_x", OFFSET_X)
+        offset_y = params.get("offset_y", OFFSET_Y)
+        layer_height = params.get("layer_height", LAYER_HEIGHT)
+        clearance = params.get("approach_clearance_z", APPROACH_CLEARANCE_Z)
+
+        slots = []
+        for i in range(total_slots):
+            layer = i // slots_per_floor
+            slot_in_layer = i % slots_per_floor
+            r = slot_in_layer // grid_x
+            c = slot_in_layer % grid_x
+
+            x = DROP_BASE_LOCATION[0] - r * offset_x
+            y = DROP_BASE_LOCATION[1] + c * offset_y
+            z = DROP_BASE_LOCATION[2] + layer * layer_height
+            target_pose = [round(x, 2), round(y, 2), round(z, 2), *DROP_BASE_LOCATION[3:]]
+            app_pose = get_approach_pose(target_pose, clearance=clearance)
+
+            placed = i < self.pallet_count
+
+            slots.append({
+                "index": i,
+                "floor": layer,
+                "row": r,
+                "col": c,
+                "placed": placed,
+                "target_pose": target_pose,
+                "approach_pose": [round(v, 2) for v in app_pose],
+                "extract_pose": [round(v, 2) for v in app_pose],
+                "angle": {
+                    "u": DROP_BASE_LOCATION[3],
+                    "v": DROP_BASE_LOCATION[4],
+                    "w": DROP_BASE_LOCATION[5],
+                    "tilt_deg": round(DROP_BASE_LOCATION[3], 2)
+                }
+            })
+        self.slots = slots
+
 
     def get_approach_pose(self, target_pose: List[float], clearance: float = APPROACH_CLEARANCE_Z) -> List[float]:
         """Computes collinear approach/extract pose backed off along tool TCP Z-axis vector."""
@@ -1005,50 +1162,205 @@ class PalletizerEngine:
 
             return self._launch_program(self._run_put_back_sequence)
 
+    def start_work_order(self, order_id: str) -> Dict[str, Any]:
+        """Starts executing a persisted work order using its immutable recipe snapshot."""
+        with self.lock:
+            if self.is_moving or self.sequence_running or self.stop_active or self.fault:
+                return {"success": False, "message": "Cell is busy or requires recovery"}
+            wo = self.storage.get_work_order(order_id)
+            if not wo:
+                return {"success": False, "message": f"Work order {order_id} not found"}
+            if wo["status"] in ("completed", "cancelled"):
+                return {"success": False, "message": f"Work order is already {wo['status']}"}
+
+            self.active_order_id = wo["order_id"]
+            self.active_order_number = wo["order_number"]
+            self.active_order_snapshot = wo.get("recipe_snapshot", {})
+            self.order_target_quantity = wo["target_quantity"]
+            self.order_completed_quantity = wo["completed_quantity"]
+            self.current_pallet_index = wo["current_pallet_index"]
+            self.pallet_change_required = False
+
+            # Set recipe version for reporting
+            self.recipe_id = wo["recipe_id"]
+            self.recipe_version = wo["recipe_version"]
+
+            # Reconfigure virtual slots geometry to match recipe parameters
+            self._reconfigure_slots_from_recipe(self.active_order_snapshot)
+
+            self.storage.start_work_order(self.active_order_id)
+            self.storage.record_operator_action("START_WORK_ORDER", {
+                "order_id": self.active_order_id,
+                "order_number": self.active_order_number,
+                "target_quantity": self.order_target_quantity,
+            })
+
+            # Check if current pallet is full and requires swap first
+            total_slots = len(self.slots) or TOTAL_MAX_ITEMS
+            if self.pallet_count >= total_slots and self.order_completed_quantity < self.order_target_quantity:
+                self.pallet_change_required = True
+                self.motion_phase = "WAITING_PALLET_CHANGE"
+                self.status_msg = f"Pallet #{self.current_pallet_index} is FULL. Please swap pallet to continue."
+                return {"success": True, "message": "Pallet swap required", "pallet_change_required": True}
+
+            # In simulation, ensure feeder has parts
+            if self.mode == "SIMULATION" and (self.magazine_count <= 0 or not self.mag_sensor):
+                self.magazine_count = max(8, len(self.slots))
+                self.mag_sensor = True
+
+            res = self._launch_program(self._run_palletize_sequence)
+            cmd_id = res.get("command_id") if isinstance(res, dict) else None
+            return {"success": res is not False, "order_id": self.active_order_id, "command_id": cmd_id}
+
+    def confirm_pallet_swap(self) -> Dict[str, Any]:
+        """Operator action: clears the full pallet, refills feeder in simulation, and resumes work order."""
+        with self.lock:
+            # Clear virtual pallet
+            self.pallet_count = 0
+            for s in self.slots:
+                s["placed"] = False
+            self.held_workpiece = False
+
+            # In simulation, refill feeder so production continues
+            if self.mode == "SIMULATION":
+                self.magazine_count = max(8, len(self.slots))
+                self.mag_sensor = True
+
+            order_id = self.active_order_id
+            if order_id:
+                new_pallet_idx = self.storage.swap_work_order_pallet(order_id)
+                self.current_pallet_index = new_pallet_idx
+            else:
+                self.current_pallet_index += 1
+
+            self.pallet_change_required = False
+            self.status_msg = f"Pallet swapped! Ready for Pallet #{self.current_pallet_index}."
+            self.storage.record_operator_action("CONFIRM_PALLET_SWAP", {
+                "order_id": order_id,
+                "new_pallet_index": self.current_pallet_index,
+            })
+
+            # If work order has remaining parts, automatically resume palletizing
+            if order_id and self.order_completed_quantity < self.order_target_quantity:
+                self.status_msg = f"Resuming Work Order for Pallet #{self.current_pallet_index}..."
+                res = self._launch_program(self._run_palletize_sequence)
+                cmd_id = res.get("command_id") if isinstance(res, dict) else None
+                return {"success": True, "current_pallet_index": self.current_pallet_index, "resumed": True, "command_id": cmd_id}
+
+            return {"success": True, "current_pallet_index": self.current_pallet_index, "resumed": False}
+
+    def cancel_active_work_order(self) -> Dict[str, Any]:
+        """Operator action: cancels active work order and halts motion safely."""
+        with self.lock:
+            if not self.active_order_id:
+                return {"success": False, "message": "No active work order"}
+            order_id = self.active_order_id
+            self.storage.cancel_work_order(order_id)
+            self.storage.record_operator_action("CANCEL_WORK_ORDER", {"order_id": order_id})
+            self.active_order_id = None
+            self.pallet_change_required = False
+            self.set_stop(True)
+            self.status_msg = f"Work Order {order_id} cancelled by operator"
+            return {"success": True, "order_id": order_id}
+
+    def run_benchmark_experiment(
+        self,
+        name: Optional[str] = None,
+        baseline_recipe_id: str = "pallet-2x2x2-default",
+        candidate_recipe_id: str = "pallet-high-speed",
+        trials: int = 5,
+        fast_mode: bool = True,
+    ) -> Dict[str, Any]:
+        """Executes a cycle time and kinetic benchmark experiment between two recipes."""
+        trials = max(2, min(50, int(trials)))
+        bench = self.storage.run_fast_benchmark(
+            baseline_recipe_id=baseline_recipe_id,
+            candidate_recipe_id=candidate_recipe_id,
+            trials=trials,
+            name=name,
+        )
+        self.storage.record_operator_action("RUN_BENCHMARK", {
+            "benchmark_id": bench["benchmark_id"],
+            "baseline": baseline_recipe_id,
+            "candidate": candidate_recipe_id,
+            "trials": trials,
+            "fast_mode": fast_mode,
+        })
+        return bench
+
     def _sim_move(self, q_target, duration, step_name):
         return self.simulation_driver._sim_move(q_target, duration, step_name)
 
     def _run_palletize_sequence(self):
-        """Executes exact single-pallet 8-slot palletizing loop using MoveL matching palletizing_with_plc.py."""
+        """Executes palletizing routine using calibrated/recipe parameters and records step events."""
         self.cycle_start_time = time.time()
         t_run_start = time.monotonic()
-        start_count = self.pallet_count
         run_id = self.active_run_id or str(uuid.uuid4())
         self.active_run_id = run_id
+
+        # Determine if running under a Work Order or standard manual PB1
+        order_id = self.active_order_id
+        recipe_params = self.active_order_snapshot if order_id else {}
+        slots_per_floor = recipe_params.get("slots_per_floor", SLOTS_PER_FLOOR)
+        total_slots = recipe_params.get("total_slots", len(self.slots) or TOTAL_MAX_ITEMS)
+        transit_vel = recipe_params.get("transit_vel_ratio", TRANSIT_VEL_RATIO)
+        transit_acc = recipe_params.get("transit_acc_ratio", TRANSIT_ACC_RATIO)
+        action_vel = recipe_params.get("action_vel_ratio", ACTION_VEL_RATIO)
+        action_acc = recipe_params.get("action_acc_ratio", ACTION_ACC_RATIO)
+        clearance = recipe_params.get("approach_clearance_z", APPROACH_CLEARANCE_Z)
+        dwell = recipe_params.get("gripper_dwell_sec", GRIPPER_DWELL_SEC)
+        cmd_name = "work_order" if order_id else "pb1"
 
         try:
             self.storage.start_run(
                 run_id=run_id,
-                command="pb1",
+                command=cmd_name,
                 origin=self.mode,
                 recipe_id=self.recipe_id,
                 recipe_version=self.recipe_version,
-                target_count=TOTAL_MAX_ITEMS,
+                target_count=total_slots,
+                order_id=order_id,
             )
-            self.storage.record_state_transition("IDLE", "RUNNING", "pb1", run_id=run_id)
+            self.storage.record_state_transition("IDLE", "RUNNING", cmd_name, run_id=run_id)
         except Exception:
             logging.getLogger(__name__).exception("Failed to start run in storage")
 
         with self.lock:
             self.sequence_running = True
-            self.active_program_name = "Palletizing Loop (8 Slots)"
+            prog_name = f"Work Order {self.active_order_number or order_id}" if order_id else "Palletizing Loop (8 Slots)"
+            self.active_program_name = prog_name
 
-        # Precompute feeder pick approach pose with 100mm clearance backed off along TCP Z-axis
-        pick_approach = self.get_approach_pose(PICK_LOCATION, clearance=APPROACH_CLEARANCE_Z)
+        pick_approach = self.get_approach_pose(PICK_LOCATION, clearance=clearance)
 
         cycle_aborted = False
-        for i in range(start_count, TOTAL_MAX_ITEMS):
+        pallet_swap_paused = False
+
+        while True:
             if self.abort_requested or self.stop_active:
                 cycle_aborted = True
                 break
+
+            # If work order active, check if target quantity has already been reached
+            if order_id and self.order_completed_quantity >= self.order_target_quantity:
+                break
+
+            # Check if current pallet is full
+            if self.pallet_count >= total_slots:
+                if order_id and self.order_completed_quantity < self.order_target_quantity:
+                    pallet_swap_paused = True
+                    break
+                else:
+                    break
+
             if self.magazine_count <= 0 or not self.mag_sensor:
                 self.raise_fault("FEEDER_EMPTY", f"Feeder empty after {self.pallet_count} items")
                 cycle_aborted = True
                 break
 
-            slot_pose = self.get_pallet_slot_pose(i)
-            drop_approach = self.get_approach_pose(slot_pose, clearance=APPROACH_CLEARANCE_Z)
-            floor = i // SLOTS_PER_FLOOR
+            i = self.pallet_count
+            slot_pose = self.get_pallet_slot_pose(i, recipe_params)
+            drop_approach = self.get_approach_pose(slot_pose, clearance=clearance)
+            floor = i // slots_per_floor
 
             cycle_id = None
             t_cycle_start = time.monotonic()
@@ -1061,25 +1373,25 @@ class PalletizerEngine:
             cycle_failed = False
 
             # -------------------------------------------------------------
-            # STEP 1: Feeder Pick Approach (MoveL with -19.52° Tool Angle)
+            # STEP 1: Feeder Pick Approach
             # -------------------------------------------------------------
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Approach (Tilt: {PICK_LOCATION[3]}°)"}
             if not self._exec_step(cycle_id, "PICK_APPROACH", 1, lambda: (
                 self.set_gripper(False) and
-                self._execute_cartesian_move(pick_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                             step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)")
+                self._execute_cartesian_move(pick_approach, vel_ratio=transit_vel, acc_ratio=transit_acc,
+                                             step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {clearance}mm @ {PICK_LOCATION[3]}°)")
             )):
                 cycle_failed = True
 
             # -------------------------------------------------------------
-            # STEP 2: Feeder Pick Plunge (MoveL Collinear along -19.52° Angle)
+            # STEP 2: Feeder Pick Plunge
             # -------------------------------------------------------------
             if not cycle_failed:
                 self.motion_phase = "PLUNGE"
                 self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Plunge (Collinear @ {PICK_LOCATION[3]}°)"}
                 if not self._exec_step(cycle_id, "PICK_PLUNGE", 2, lambda: (
-                    self._execute_cartesian_move(PICK_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                    self._execute_cartesian_move(PICK_LOCATION, vel_ratio=action_vel, acc_ratio=action_acc,
                                                  step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)")
                 )):
                     cycle_failed = True
@@ -1093,7 +1405,7 @@ class PalletizerEngine:
                 def do_grip():
                     if not self.set_gripper(True):
                         return False
-                    self._dwell(GRIPPER_DWELL_SEC)
+                    self._dwell(dwell)
                     if self.abort_requested or self.stop_active:
                         return False
                     self.held_workpiece = True
@@ -1105,37 +1417,37 @@ class PalletizerEngine:
                     cycle_failed = True
 
             # -------------------------------------------------------------
-            # STEP 4: Feeder Pick Extract (MoveL Collinear Retract out of Feeder)
+            # STEP 4: Feeder Pick Extract
             # -------------------------------------------------------------
             if not cycle_failed:
                 self.motion_phase = "EXTRACT"
                 self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Extract MoveL (Collinear @ {PICK_LOCATION[3]}°)"}
                 if not self._exec_step(cycle_id, "PICK_EXTRACT", 4, lambda: (
-                    self._execute_cartesian_move(pick_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                                 step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)")
+                    self._execute_cartesian_move(pick_approach, vel_ratio=action_vel, acc_ratio=action_acc,
+                                                 step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {clearance}mm @ {PICK_LOCATION[3]}°)")
                 )):
                     cycle_failed = True
 
             # -------------------------------------------------------------
-            # STEP 5: Pallet Slot Place Approach (MoveL with -3.24° Tool Angle)
+            # STEP 5: Pallet Slot Place Approach
             # -------------------------------------------------------------
             if not cycle_failed:
                 self.motion_phase = "APPROACH"
                 self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Approach (Floor {floor}) @ {slot_pose[3]}°"}
                 if not self._exec_step(cycle_id, "PLACE_APPROACH", 5, lambda: (
-                    self._execute_cartesian_move(drop_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                                 step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)")
+                    self._execute_cartesian_move(drop_approach, vel_ratio=transit_vel, acc_ratio=transit_acc,
+                                                 step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {clearance}mm)")
                 )):
                     cycle_failed = True
 
             # -------------------------------------------------------------
-            # STEP 6: Pallet Slot Place Plunge (MoveL Lower into Slot)
+            # STEP 6: Pallet Slot Place Plunge
             # -------------------------------------------------------------
             if not cycle_failed:
                 self.motion_phase = "PLUNGE"
                 self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Place Plunge (Z={slot_pose[2]}mm)"}
                 if not self._exec_step(cycle_id, "PLACE_PLUNGE", 6, lambda: (
-                    self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                    self._execute_cartesian_move(slot_pose, vel_ratio=action_vel, acc_ratio=action_acc,
                                                  step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)")
                 )):
                     cycle_failed = True
@@ -1149,25 +1461,26 @@ class PalletizerEngine:
                 def do_release():
                     if not self.set_gripper(False):
                         return False
-                    self._dwell(GRIPPER_DWELL_SEC)
+                    self._dwell(dwell)
                     if self.abort_requested or self.stop_active:
                         return False
                     self.held_workpiece = False
-                    self.slots[i]["placed"] = True
+                    if i < len(self.slots):
+                        self.slots[i]["placed"] = True
                     self.pallet_count += 1
                     return True
                 if not self._exec_step(cycle_id, "PLACE_RELEASE", 7, do_release):
                     cycle_failed = True
 
             # -------------------------------------------------------------
-            # STEP 8: Pallet Slot Place Extract (MoveL Vertical Retract)
+            # STEP 8: Pallet Slot Place Extract
             # -------------------------------------------------------------
             if not cycle_failed:
                 self.motion_phase = "EXTRACT"
                 self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL @ {slot_pose[3]}°"}
                 if not self._exec_step(cycle_id, "PLACE_EXTRACT", 8, lambda: (
-                    self._execute_cartesian_move(drop_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                                 step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)")
+                    self._execute_cartesian_move(drop_approach, vel_ratio=action_vel, acc_ratio=action_acc,
+                                                 step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {clearance}mm)")
                 )):
                     cycle_failed = True
 
@@ -1179,11 +1492,62 @@ class PalletizerEngine:
                 except Exception:
                     pass
 
+            if not cycle_failed:
+                # Record part traceability
+                grid_x = recipe_params.get("grid_x", GRID_X)
+                slot_floor = floor
+                slot_row = (i % slots_per_floor) // grid_x
+                slot_col = (i % slots_per_floor) % grid_x
+                if order_id:
+                    onum = self.active_order_number or order_id
+                    part_serial = f"{onum}-P{self.current_pallet_index}-S{i+1:02d}"
+                    try:
+                        self.storage.record_workpiece_placed(
+                            order_id=order_id,
+                            run_id=run_id,
+                            cycle_id=cycle_id,
+                            part_serial=part_serial,
+                            pallet_index=self.current_pallet_index,
+                            slot_index=i,
+                            slot_floor=slot_floor,
+                            slot_row=slot_row,
+                            slot_col=slot_col,
+                            cycle_duration=cycle_dur,
+                        )
+                    except Exception:
+                        pass
+                    self.order_completed_quantity += 1
+                else:
+                    self.order_completed_quantity += 1
+
             if cycle_failed or self.abort_requested or self.stop_active:
                 cycle_aborted = True
                 break
 
         run_dur = round(time.monotonic() - t_run_start, 3)
+
+        if pallet_swap_paused:
+            # Pallet is full, more parts remain in order -> park at HOME and wait for swap
+            self.motion_phase = "WAITING_PALLET_CHANGE"
+            self.pallet_change_required = True
+            self._execute_move_home()
+            self.status_msg = (
+                f"Pallet #{self.current_pallet_index} FULL ({self.pallet_count}/{total_slots}). "
+                f"Pallet swap required to continue Work Order ({self.order_completed_quantity}/{self.order_target_quantity})."
+            )
+            try:
+                self.storage.pause_work_order_for_pallet_change(order_id)
+                self.storage.finish_run(run_id, status="completed", completed_count=self.pallet_count, duration_seconds=run_dur)
+                self.storage.record_state_transition("RUNNING", "WAITING", "PALLET_FULL_NEED_SWAP", run_id=run_id)
+            except Exception:
+                pass
+            with self.lock:
+                self.sequence_running = False
+                self.is_moving = False
+                self.active_run_id = None
+                self.active_cycle_id = None
+            return True
+
         if not cycle_aborted and not self.abort_requested and not self.stop_active:
             self.motion_phase = "IDLE"
             if not self._execute_move_home():
@@ -1193,7 +1557,16 @@ class PalletizerEngine:
                     pass
                 return False
             self.last_cycle_tact = run_dur
-            self.status_msg = f"Palletizing Completed! Placed: {self.pallet_count}/8 | Tact: {self.last_cycle_tact}s"
+            if order_id and self.order_completed_quantity >= self.order_target_quantity:
+                self.status_msg = f"Work Order {self.active_order_number or order_id} COMPLETED ({self.order_completed_quantity}/{self.order_target_quantity} parts)!"
+                try:
+                    self.storage.complete_work_order(order_id)
+                except Exception:
+                    pass
+                self.active_order_id = None
+            else:
+                self.status_msg = f"Palletizing Completed! Placed: {self.pallet_count}/{total_slots} | Tact: {self.last_cycle_tact}s"
+
             try:
                 self.storage.finish_run(run_id, status="completed", completed_count=self.pallet_count, duration_seconds=run_dur)
                 self.storage.record_state_transition("RUNNING", "IDLE", "completed", run_id=run_id)
@@ -1209,8 +1582,13 @@ class PalletizerEngine:
 
         with self.lock:
             self.sequence_running = False
+            self.is_moving = False
+            self.active_run_id = None
+            self.active_cycle_id = None
             self.active_program_name = "Idle"
             self.motion_phase = "IDLE"
+        return not cycle_aborted and not cycle_failed
+
 
     def _run_put_back_sequence(self):
         """Executes exact smart LIFO de-palletizing put-back loop using MoveL matching palletizing_with_plc.py."""
@@ -1455,5 +1833,17 @@ class PalletizerEngine:
                     "total": self.total_steps,
                 },
                 "waypoints": self.waypoints,
+                "work_order": {
+                    "active_order_id": self.active_order_id,
+                    "active_order_number": self.active_order_number,
+                    "target_quantity": self.order_target_quantity,
+                    "completed_quantity": self.order_completed_quantity,
+                    "current_pallet_index": self.current_pallet_index,
+                    "pallet_change_required": self.pallet_change_required,
+                    "progress_pct": round((self.order_completed_quantity / self.order_target_quantity) * 100.0, 1) if self.order_target_quantity > 0 else 0.0,
+                } if self.active_order_id else None,
+                "pallet_change_required": self.pallet_change_required,
+                "current_pallet_index": self.current_pallet_index,
                 "timestamp": time.time()
             }
+

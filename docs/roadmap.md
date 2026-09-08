@@ -15,13 +15,21 @@ Cartesian simulation previously changed TCP pose (`p`) without updating joint an
 
 Regression coverage executes real motion samples and checks joint/TCP consistency, path geometry, orientation wrapping, stop handling, and unreachable targets. The benchmark also records joint ranges and FK position error. Collision, dynamics, hardware joint limits, and detailed gripper/workpiece contact calibration remain outside the kinematic simulation.
 
-## Next milestone: production records and analysis
+## Implemented: Milestone 1 — Production event data
 
-1. Add SQLite migrations for runs, cycles, process steps, transitions, alarms, and operator actions.
-2. Emit events at controller transitions and step boundaries with monotonic durations and UTC timestamps.
-3. Persist simulation/hardware origin and recipe version with every run.
-4. Build production history, mean/p95 cycle time, step breakdown, and downtime views.
-5. Test restart persistence and reconcile partial/interrupted runs.
+- Durable SQLite persistence in `src/digitaltwin/storage.py` with WAL mode and automated schema migrations.
+- Tables: `production_runs`, `cycles`, `process_steps`, `state_transitions`, `fault_events`, `operator_actions`.
+- Granular step-level duration tracking with monotonic timing (`time.monotonic()`) across all 8 palletize and put-back motion/dwell phases.
+- Safe server restart recovery: unclosed runs and cycles reconcile to `interrupted`.
+- REST endpoints for querying runs (`/api/production/runs`), run details with nested cycles/steps (`/api/production/runs/{run_id}`), chronological event timeline (`/api/production/events`), and aggregated KPI summaries (`/api/production/kpi/summary`).
+- Complete automated test suite in `tests/test_persistence.py`.
+
+## Next milestone: Milestone 2 — KPI and production dashboard
+
+1. Build production history and analytics dashboard views (completed parts, throughput).
+2. Display average and p95 cycle time metrics calculated from durable cycle records.
+3. Visualize step-time breakdown (approach, plunge, grip, extract, release).
+4. Render equipment state timeline and downtime Pareto charts from persisted events.
 
 ## Then: production workflow
 

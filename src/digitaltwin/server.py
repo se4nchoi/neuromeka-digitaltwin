@@ -301,8 +301,44 @@ async def get_command(command_id: str):
     with engine.lock:
         record = next((dict(c) for c in engine.commands if c["command_id"] == command_id), None)
     if record is None:
-        raise HTTPException(404, "Command not found (history retains the last 100 commands)")
+        run = await asyncio.to_thread(engine.storage.get_run, command_id)
+        if run:
+            record = {
+                "command_id": run["run_id"],
+                "cmd": run["command"],
+                "status": run["status"],
+                "success": run["status"] == "completed",
+                "submitted_at": run["start_time"],
+                "finished_at": run["end_time"],
+                "message": run.get("error_message") or ("Run completed" if run["status"] == "completed" else run["status"]),
+            }
+    if record is None:
+        raise HTTPException(404, "Command not found in memory history or persistent storage")
     return record
+
+
+# --- PRODUCTION PERSISTENCE & KPI ENDPOINTS ---
+@app.get("/api/production/runs")
+async def list_production_runs(limit: int = 50, offset: int = 0, status: Optional[str] = None):
+    return await asyncio.to_thread(engine.storage.list_runs, limit=limit, offset=offset, status=status)
+
+
+@app.get("/api/production/runs/{run_id}")
+async def get_production_run(run_id: str):
+    run = await asyncio.to_thread(engine.storage.get_run, run_id)
+    if run is None:
+        raise HTTPException(404, f"Production run {run_id} not found")
+    return run
+
+
+@app.get("/api/production/events")
+async def list_production_events(limit: int = 100):
+    return await asyncio.to_thread(engine.storage.list_events, limit=limit)
+
+
+@app.get("/api/production/kpi/summary")
+async def get_kpi_summary():
+    return await asyncio.to_thread(engine.storage.calculate_kpi_summary)
 
 
 @app.get("/api/health")

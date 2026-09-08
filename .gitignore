@@ -18,3 +18,12 @@ src/plc_conn/
 src/prof_examples/
 src/hmi/
 src/neuromeka_digitaltwin/
+
+# SQLite Databases & Local Storage
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+

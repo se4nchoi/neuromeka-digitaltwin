@@ -9,6 +9,11 @@ if STARTUP_MODE not in {"SIMULATION", "HARDWARE_LIVE"}:
     raise ValueError("DIGITALTWIN_MODE must be SIMULATION or HARDWARE_LIVE")
 TELEMETRY_HZ = 30  # WebSocket push frequency
 
+# Database & Storage
+DEFAULT_DB_PATH = os.getenv("DIGITALTWIN_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "data", "production.db"))
+DEFAULT_RECIPE_ID = os.getenv("DIGITALTWIN_RECIPE_ID", "pallet-2x2x2-default")
+DEFAULT_RECIPE_VERSION = os.getenv("DIGITALTWIN_RECIPE_VERSION", "1.0.0")
+
 # Hardware Defaults
 DEFAULT_ROBOT_IP = os.getenv("DIGITALTWIN_ROBOT_IP", "192.168.3.7")
 DEFAULT_ROBOT_INDEX = 0

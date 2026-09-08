@@ -35,7 +35,9 @@ class CommandService:
 
     def execute(self, cmd, **payload):
         e = self.engine
-        record = {"command_id": str(uuid.uuid4()), "cmd": cmd, "submitted_at": time.time()}
+        cmd_id = str(uuid.uuid4())
+        e.current_command_id = cmd_id
+        record = {"command_id": cmd_id, "cmd": cmd, "submitted_at": time.time()}
         try:
             p = Command(cmd=cmd, **payload)
             with e.lock:
@@ -70,6 +72,11 @@ class CommandService:
                     "reset_pallet": self.reset_cell,
                 }
                 result = handlers[cmd]()
+                if cmd in {"speed", "inject_fault", "sensor", "reset_pallet", "direct_teaching", "gripper"}:
+                    try:
+                        e.storage.record_operator_action(cmd.upper(), payload)
+                    except Exception:
+                        pass
                 if isinstance(result, dict) and "command_id" in result:
                     e.commands[-1]["cmd"] = cmd
                     return {**result, "cmd": cmd}
@@ -97,3 +104,7 @@ class CommandService:
         e.mag_sensor = True
         e.slots = e._init_slots()
         e.status_msg = "Simulation inventory reset; recover separately if stopped or faulted"
+        try:
+            e.storage.record_operator_action("RESET_INVENTORY")
+        except Exception:
+            pass

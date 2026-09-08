@@ -16,9 +16,13 @@ import threading
 import logging
 import uuid
 from .drivers import HardwareDriver, SimulationDriver
+from .storage import ProductionStorage
 import numpy as np
 from typing import Dict, List, Optional
 from .config import (
+    DEFAULT_DB_PATH,
+    DEFAULT_RECIPE_ID,
+    DEFAULT_RECIPE_VERSION,
     DEFAULT_ROBOT_IP,
     STARTUP_MODE,
     PICK_LOCATION,
@@ -126,8 +130,15 @@ def forward_kinematics_craig(q_deg: List[float]) -> List[float]:
 
 
 class PalletizerEngine:
-    def __init__(self, startup_mode=None):
+    def __init__(self, startup_mode=None, storage: Optional[ProductionStorage] = None):
         self.lock = threading.RLock()
+        self.storage = storage if storage is not None else ProductionStorage(DEFAULT_DB_PATH)
+        self.recipe_id = DEFAULT_RECIPE_ID
+        self.recipe_version = DEFAULT_RECIPE_VERSION
+        self.active_run_id: Optional[str] = None
+        self.active_cycle_id: Optional[str] = None
+        self.current_command_id: Optional[str] = None
+
         self.robot_ip = DEFAULT_ROBOT_IP
         self.indy: Optional[IndyDCP3] = None
         self.hardware_connected = False
@@ -196,6 +207,10 @@ class PalletizerEngine:
 
     def start(self):
         """Start I/O only during application lifespan, never on import."""
+        try:
+            self.storage.reconcile_interrupted_runs()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to reconcile interrupted runs")
         if self.poll_thread and self.poll_thread.is_alive():
             return
         self.running = True
@@ -211,6 +226,10 @@ class PalletizerEngine:
         for thread in (self.active_thread, self.poll_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=3)
+        try:
+            self.storage.close()
+        except Exception:
+            pass
 
     @property
     def workcell_state(self):
@@ -228,14 +247,32 @@ class PalletizerEngine:
         with self.lock:
             if self.fault:
                 return
+            prev_state = self.workcell_state
+            recovery_req = "Resolve cause, wait for motion to stop, then recover. Interrupted programs restart; they do not resume."
             self.fault = {"code": code, "message": message,
                           "timestamp": time.time(), "step": self.status_msg,
-                          "recovery": "Resolve cause, wait for motion to stop, then recover. Interrupted programs restart; they do not resume."}
+                          "recovery": recovery_req}
             self.events.append(dict(self.fault))
             self.events[:] = self.events[-100:]
             self.abort_requested = True
             self.status_msg = message
             logging.getLogger(__name__).warning("Workcell fault %s: %s", code, message)
+            try:
+                self.storage.record_fault(
+                    code=code,
+                    message=message,
+                    interrupted_step=self.status_msg,
+                    recovery_requirement=recovery_req,
+                    run_id=self.active_run_id,
+                )
+                self.storage.record_state_transition(
+                    from_state=prev_state,
+                    to_state="FAULTED",
+                    trigger=f"fault:{code}",
+                    run_id=self.active_run_id,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to record fault in storage")
 
     def inject_fault(self, code):
         with self.lock:
@@ -255,6 +292,29 @@ class PalletizerEngine:
             time.sleep(min(0.02, max(0, deadline - time.monotonic())))
         return True
 
+    def _exec_step(self, cycle_id: Optional[str], step_name: str, step_idx: int, action_fn, details: Optional[Dict] = None) -> bool:
+        step_id = None
+        t0 = time.monotonic()
+        if cycle_id:
+            try:
+                step_id = self.storage.start_step(cycle_id, step_name, step_idx, details)
+            except Exception:
+                pass
+        outcome = False
+        try:
+            outcome = bool(action_fn())
+        except Exception:
+            logging.getLogger(__name__).exception("Step %s execution failed", step_name)
+            outcome = False
+        dur = round(time.monotonic() - t0, 3)
+        status = "completed" if outcome else ("cancelled" if (self.stop_active or self.abort_requested) else "failed")
+        if cycle_id and step_id:
+            try:
+                self.storage.finish_step(step_id, status=status, duration_seconds=dur, details=details)
+            except Exception:
+                pass
+        return outcome
+
     def _launch_program(self, worker):
         with self.lock:
             if (self.sequence_running or self.is_moving or self.stop_active or self.fault
@@ -265,13 +325,17 @@ class PalletizerEngine:
                 self.status_msg = "Program rejected: reconnect or recover first"
                 return False
             self.sequence_running = True
-            command = {"command_id": str(uuid.uuid4()), "status": "accepted",
+            cmd_id = self.current_command_id or str(uuid.uuid4())
+            self.current_command_id = cmd_id
+            self.active_run_id = cmd_id
+            command = {"command_id": cmd_id, "status": "accepted",
                        "success": True, "submitted_at": time.time()}
             self.commands.append(command)
             self.commands[:] = self.commands[-100:]
             response = dict(command)
 
             def run():
+                self.active_run_id = cmd_id
                 with self.lock:
                     command.update(status="running", started_at=time.time())
                 try:
@@ -668,6 +732,8 @@ class PalletizerEngine:
             if self.mode == "DISCONNECTED":
                 self.status_msg = "Reconnect equipment before recovery"
                 return False
+            prev_state = self.workcell_state
+            success = False
             if self.hardware_connected and self.indy:
                 try:
                     self.indy.recover()
@@ -675,7 +741,7 @@ class PalletizerEngine:
                     self.abort_requested = False
                     self.fault = None
                     self.status_msg = "Robot Recovered & Fault Cleared"
-                    return True
+                    success = True
                 except Exception as e:
                     self.status_msg = f"Recover Error: {e}"
                     return False
@@ -686,7 +752,21 @@ class PalletizerEngine:
                 self.op_state = 5
                 self.op_state_name = "OP_IDLE (5)"
                 self.status_msg = "[SIM] System Reset / Ready"
-                return True
+                success = True
+
+            if success:
+                try:
+                    self.storage.resolve_faults()
+                    self.storage.record_state_transition(
+                        from_state=prev_state,
+                        to_state=self.workcell_state,
+                        trigger="recover",
+                        run_id=self.active_run_id,
+                    )
+                    self.storage.record_operator_action("RECOVER")
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to record recovery in storage")
+            return success
 
     def move_to_waypoint(self, wp_id):
         from copy import deepcopy
@@ -877,6 +957,7 @@ class PalletizerEngine:
 
     def set_stop(self, active: bool = True):
         with self.lock:
+            prev_state = self.workcell_state
             self.stop_active = active
             if active:
                 self.abort_requested = True
@@ -888,6 +969,18 @@ class PalletizerEngine:
                         pass
             else:
                 self.status_msg = "Stop released; use Recover before restarting"
+            try:
+                self.storage.record_operator_action("STOP", {"active": active})
+                new_state = self.workcell_state
+                if new_state != prev_state:
+                    self.storage.record_state_transition(
+                        from_state=prev_state,
+                        to_state=new_state,
+                        trigger="stop:active" if active else "stop:release",
+                        run_id=self.active_run_id,
+                    )
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to record stop in storage")
 
     def trigger_pb1_palletize(self):
         with self.lock:
@@ -918,7 +1011,24 @@ class PalletizerEngine:
     def _run_palletize_sequence(self):
         """Executes exact single-pallet 8-slot palletizing loop using MoveL matching palletizing_with_plc.py."""
         self.cycle_start_time = time.time()
+        t_run_start = time.monotonic()
         start_count = self.pallet_count
+        run_id = self.active_run_id or str(uuid.uuid4())
+        self.active_run_id = run_id
+
+        try:
+            self.storage.start_run(
+                run_id=run_id,
+                command="pb1",
+                origin=self.mode,
+                recipe_id=self.recipe_id,
+                recipe_version=self.recipe_version,
+                target_count=TOTAL_MAX_ITEMS,
+            )
+            self.storage.record_state_transition("IDLE", "RUNNING", "pb1", run_id=run_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to start run in storage")
+
         with self.lock:
             self.sequence_running = True
             self.active_program_name = "Palletizing Loop (8 Slots)"
@@ -926,108 +1036,176 @@ class PalletizerEngine:
         # Precompute feeder pick approach pose with 100mm clearance backed off along TCP Z-axis
         pick_approach = self.get_approach_pose(PICK_LOCATION, clearance=APPROACH_CLEARANCE_Z)
 
+        cycle_aborted = False
         for i in range(start_count, TOTAL_MAX_ITEMS):
             if self.abort_requested or self.stop_active:
+                cycle_aborted = True
                 break
             if self.magazine_count <= 0 or not self.mag_sensor:
                 self.raise_fault("FEEDER_EMPTY", f"Feeder empty after {self.pallet_count} items")
+                cycle_aborted = True
                 break
 
             slot_pose = self.get_pallet_slot_pose(i)
             drop_approach = self.get_approach_pose(slot_pose, clearance=APPROACH_CLEARANCE_Z)
             floor = i // SLOTS_PER_FLOOR
 
+            cycle_id = None
+            t_cycle_start = time.monotonic()
+            try:
+                cycle_id = self.storage.start_cycle(run_id=run_id, cycle_index=i, target_slot=i)
+                self.active_cycle_id = cycle_id
+            except Exception:
+                pass
+
+            cycle_failed = False
+
             # -------------------------------------------------------------
             # STEP 1: Feeder Pick Approach (MoveL with -19.52° Tool Angle)
             # -------------------------------------------------------------
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Approach (Tilt: {PICK_LOCATION[3]}°)"}
-            if not self.set_gripper(False):
-                return False
-            if not self._execute_cartesian_move(pick_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
-                return False
+            if not self._exec_step(cycle_id, "PICK_APPROACH", 1, lambda: (
+                self.set_gripper(False) and
+                self._execute_cartesian_move(pick_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
+                                             step_name=f"[Item {i+1}] Feeder Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)")
+            )):
+                cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 2: Feeder Pick Plunge (MoveL Collinear along -19.52° Angle)
             # -------------------------------------------------------------
-            self.motion_phase = "PLUNGE"
-            self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Plunge (Collinear @ {PICK_LOCATION[3]}°)"}
-            if not self._execute_cartesian_move(PICK_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "PLUNGE"
+                self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Plunge (Collinear @ {PICK_LOCATION[3]}°)"}
+                if not self._exec_step(cycle_id, "PICK_PLUNGE", 2, lambda: (
+                    self._execute_cartesian_move(PICK_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Item {i+1}] Feeder Pick Plunge MoveL (Collinear @ {PICK_LOCATION[3]}°)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 3: Grip Billet
             # -------------------------------------------------------------
-            self.motion_phase = "GRIP"
-            self.status_msg = f"[Item {i+1}] Gripping Billet (DO1=ON)"
-            if not self.set_gripper(True):
-                return False
-            self._dwell(GRIPPER_DWELL_SEC)
-            if self.abort_requested or self.stop_active:
-                break
-            self.held_workpiece = True
-            self.magazine_count = max(0, self.magazine_count - 1)
-            if self.magazine_count == 0:
-                self.mag_sensor = False
+            if not cycle_failed:
+                self.motion_phase = "GRIP"
+                self.status_msg = f"[Item {i+1}] Gripping Billet (DO1=ON)"
+                def do_grip():
+                    if not self.set_gripper(True):
+                        return False
+                    self._dwell(GRIPPER_DWELL_SEC)
+                    if self.abort_requested or self.stop_active:
+                        return False
+                    self.held_workpiece = True
+                    self.magazine_count = max(0, self.magazine_count - 1)
+                    if self.magazine_count == 0:
+                        self.mag_sensor = False
+                    return True
+                if not self._exec_step(cycle_id, "PICK_GRIP", 3, do_grip):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 4: Feeder Pick Extract (MoveL Collinear Retract out of Feeder)
             # -------------------------------------------------------------
-            self.motion_phase = "EXTRACT"
-            self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Extract MoveL (Collinear @ {PICK_LOCATION[3]}°)"}
-            if not self._execute_cartesian_move(pick_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "EXTRACT"
+                self.motion_angle = {"u": PICK_LOCATION[3], "v": PICK_LOCATION[4], "w": PICK_LOCATION[5], "desc": f"Feeder Pick Extract MoveL (Collinear @ {PICK_LOCATION[3]}°)"}
+                if not self._exec_step(cycle_id, "PICK_EXTRACT", 4, lambda: (
+                    self._execute_cartesian_move(pick_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Item {i+1}] Feeder Pick Extract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {PICK_LOCATION[3]}°)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 5: Pallet Slot Place Approach (MoveL with -3.24° Tool Angle)
             # -------------------------------------------------------------
-            self.motion_phase = "APPROACH"
-            self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Approach (Floor {floor}) @ {slot_pose[3]}°"}
-            if not self._execute_cartesian_move(drop_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "APPROACH"
+                self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Approach (Floor {floor}) @ {slot_pose[3]}°"}
+                if not self._exec_step(cycle_id, "PLACE_APPROACH", 5, lambda: (
+                    self._execute_cartesian_move(drop_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
+                                                 step_name=f"[Item {i+1}] Pallet Slot {i+1} Approach MoveL (Floor {floor}, Clearance {APPROACH_CLEARANCE_Z}mm)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 6: Pallet Slot Place Plunge (MoveL Lower into Slot)
             # -------------------------------------------------------------
-            self.motion_phase = "PLUNGE"
-            self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Place Plunge (Z={slot_pose[2]}mm)"}
-            if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "PLUNGE"
+                self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Place Plunge (Z={slot_pose[2]}mm)"}
+                if not self._exec_step(cycle_id, "PLACE_PLUNGE", 6, lambda: (
+                    self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Item {i+1}] Lowering to Slot {i+1} MoveL (Z={slot_pose[2]}mm)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 7: Release Billet
             # -------------------------------------------------------------
-            self.motion_phase = "RELEASE"
-            self.status_msg = f"[Item {i+1}] Releasing into Slot {i+1} (DO0=ON)"
-            if not self.set_gripper(False):
-                return False
-            self._dwell(GRIPPER_DWELL_SEC)
-            if self.abort_requested or self.stop_active:
-                break
-            self.held_workpiece = False
-            self.slots[i]["placed"] = True
-            self.pallet_count += 1
+            if not cycle_failed:
+                self.motion_phase = "RELEASE"
+                self.status_msg = f"[Item {i+1}] Releasing into Slot {i+1} (DO0=ON)"
+                def do_release():
+                    if not self.set_gripper(False):
+                        return False
+                    self._dwell(GRIPPER_DWELL_SEC)
+                    if self.abort_requested or self.stop_active:
+                        return False
+                    self.held_workpiece = False
+                    self.slots[i]["placed"] = True
+                    self.pallet_count += 1
+                    return True
+                if not self._exec_step(cycle_id, "PLACE_RELEASE", 7, do_release):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 8: Pallet Slot Place Extract (MoveL Vertical Retract)
             # -------------------------------------------------------------
-            self.motion_phase = "EXTRACT"
-            self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL @ {slot_pose[3]}°"}
-            if not self._execute_cartesian_move(drop_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
+            if not cycle_failed:
+                self.motion_phase = "EXTRACT"
+                self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL @ {slot_pose[3]}°"}
+                if not self._exec_step(cycle_id, "PLACE_EXTRACT", 8, lambda: (
+                    self._execute_cartesian_move(drop_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Item {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)")
+                )):
+                    cycle_failed = True
+
+            cycle_dur = round(time.monotonic() - t_cycle_start, 3)
+            c_status = "completed" if not cycle_failed else ("cancelled" if (self.stop_active or self.abort_requested) else "failed")
+            if cycle_id:
+                try:
+                    self.storage.finish_cycle(cycle_id, status=c_status, duration_seconds=cycle_dur)
+                except Exception:
+                    pass
+
+            if cycle_failed or self.abort_requested or self.stop_active:
+                cycle_aborted = True
                 break
 
-        if not self.abort_requested and not self.stop_active:
+        run_dur = round(time.monotonic() - t_run_start, 3)
+        if not cycle_aborted and not self.abort_requested and not self.stop_active:
             self.motion_phase = "IDLE"
             if not self._execute_move_home():
+                try:
+                    self.storage.finish_run(run_id, status="failed", completed_count=self.pallet_count, duration_seconds=run_dur, error_message=self.status_msg)
+                except Exception:
+                    pass
                 return False
-            self.last_cycle_tact = round(time.time() - self.cycle_start_time, 2)
+            self.last_cycle_tact = run_dur
             self.status_msg = f"Palletizing Completed! Placed: {self.pallet_count}/8 | Tact: {self.last_cycle_tact}s"
+            try:
+                self.storage.finish_run(run_id, status="completed", completed_count=self.pallet_count, duration_seconds=run_dur)
+                self.storage.record_state_transition("RUNNING", "IDLE", "completed", run_id=run_id)
+            except Exception:
+                pass
+        else:
+            final_status = "cancelled" if (self.stop_active or self.abort_requested and not self.fault) else "failed"
+            try:
+                self.storage.finish_run(run_id, status=final_status, completed_count=self.pallet_count, duration_seconds=run_dur, error_message=self.status_msg)
+                self.storage.record_state_transition("RUNNING", self.workcell_state, final_status, run_id=run_id)
+            except Exception:
+                pass
 
         with self.lock:
             self.sequence_running = False
@@ -1037,111 +1215,195 @@ class PalletizerEngine:
     def _run_put_back_sequence(self):
         """Executes exact smart LIFO de-palletizing put-back loop using MoveL matching palletizing_with_plc.py."""
         self.cycle_start_time = time.time()
+        t_run_start = time.monotonic()
         start_count = self.pallet_count
+        run_id = self.active_run_id or str(uuid.uuid4())
+        self.active_run_id = run_id
+
+        try:
+            self.storage.start_run(
+                run_id=run_id,
+                command="pb2",
+                origin=self.mode,
+                recipe_id=self.recipe_id,
+                recipe_version=self.recipe_version,
+                target_count=start_count,
+            )
+            self.storage.record_state_transition("IDLE", "RUNNING", "pb2", run_id=run_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to start put-back run in storage")
+
         with self.lock:
             self.sequence_running = True
             self.active_program_name = "Put-Back LIFO (Depalletize)"
 
         mag_insert_approach = self.get_approach_pose(MAGAZINE_INSERT_LOCATION, clearance=APPROACH_CLEARANCE_Z)
 
+        cycle_aborted = False
         for i in range(start_count - 1, -1, -1):
             if self.abort_requested or self.stop_active:
+                cycle_aborted = True
                 break
 
             slot_pose = self.get_pallet_slot_pose(i)
             slot_approach = self.get_approach_pose(slot_pose, clearance=APPROACH_CLEARANCE_Z)
             floor = i // SLOTS_PER_FLOOR
 
+            cycle_id = None
+            t_cycle_start = time.monotonic()
+            try:
+                cycle_id = self.storage.start_cycle(run_id=run_id, cycle_index=i, target_slot=i)
+                self.active_cycle_id = cycle_id
+            except Exception:
+                pass
+
+            cycle_failed = False
+
             # -------------------------------------------------------------
             # STEP 1: Pallet Slot Pick Approach (MoveL to Slot Clearance)
             # -------------------------------------------------------------
             self.motion_phase = "APPROACH"
             self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Return Approach (Floor {floor})"}
-            if not self.set_gripper(False):
-                return False
-            if not self._execute_cartesian_move(slot_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Slot {i+1} Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                return False
+            if not self._exec_step(cycle_id, "SLOT_PICK_APPROACH", 1, lambda: (
+                self.set_gripper(False) and
+                self._execute_cartesian_move(slot_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
+                                             step_name=f"[Return {i+1}] Slot {i+1} Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)")
+            )):
+                cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 2: Pallet Slot Pick Plunge (MoveL Grasp Height)
             # -------------------------------------------------------------
-            self.motion_phase = "PLUNGE"
-            self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Plunge to Grasp (Z={slot_pose[2]}mm)"}
-            if not self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Plunging to Slot {i+1} MoveL (Z={slot_pose[2]}mm)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "PLUNGE"
+                self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Plunge to Grasp (Z={slot_pose[2]}mm)"}
+                if not self._exec_step(cycle_id, "SLOT_PICK_PLUNGE", 2, lambda: (
+                    self._execute_cartesian_move(slot_pose, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Return {i+1}] Plunging to Slot {i+1} MoveL (Z={slot_pose[2]}mm)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 3: Grip Billet
             # -------------------------------------------------------------
-            self.motion_phase = "GRIP"
-            self.status_msg = f"[Return {i+1}] Gripping Billet (DO1=ON)"
-            if not self.set_gripper(True):
-                return False
-            self._dwell(GRIPPER_DWELL_SEC)
-            if self.abort_requested or self.stop_active:
-                break
-            self.held_workpiece = True
-            self.slots[i]["placed"] = False
-            self.pallet_count -= 1
+            if not cycle_failed:
+                self.motion_phase = "GRIP"
+                self.status_msg = f"[Return {i+1}] Gripping Billet (DO1=ON)"
+                def do_grip():
+                    if not self.set_gripper(True):
+                        return False
+                    self._dwell(GRIPPER_DWELL_SEC)
+                    if self.abort_requested or self.stop_active:
+                        return False
+                    self.held_workpiece = True
+                    self.slots[i]["placed"] = False
+                    self.pallet_count -= 1
+                    return True
+                if not self._exec_step(cycle_id, "SLOT_PICK_GRIP", 3, do_grip):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 4: Pallet Slot Pick Extract (MoveL Retract Clearance)
             # -------------------------------------------------------------
-            self.motion_phase = "EXTRACT"
-            self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL"}
-            if not self._execute_cartesian_move(slot_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "EXTRACT"
+                self.motion_angle = {"u": slot_pose[3], "v": slot_pose[4], "w": slot_pose[5], "desc": f"Slot {i+1} Extract Retract MoveL"}
+                if not self._exec_step(cycle_id, "SLOT_PICK_EXTRACT", 4, lambda: (
+                    self._execute_cartesian_move(slot_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Return {i+1}] Slot {i+1} Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 5: Feeder Top Insert Approach (MoveL to Feeder Top Clearance)
             # -------------------------------------------------------------
-            self.motion_phase = "APPROACH"
-            self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Top Approach @ {MAGAZINE_INSERT_LOCATION[3]}°"}
-            if not self._execute_cartesian_move(mag_insert_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Feeder Top Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "APPROACH"
+                self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Top Approach @ {MAGAZINE_INSERT_LOCATION[3]}°"}
+                if not self._exec_step(cycle_id, "MAGAZINE_PLACE_APPROACH", 5, lambda: (
+                    self._execute_cartesian_move(mag_insert_approach, vel_ratio=TRANSIT_VEL_RATIO, acc_ratio=TRANSIT_ACC_RATIO,
+                                                 step_name=f"[Return {i+1}] Feeder Top Approach MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 6: Feeder Top Insert Plunge (MoveL Collinear Insert)
             # -------------------------------------------------------------
-            self.motion_phase = "PLUNGE"
-            self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Insert Plunge (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"}
-            if not self._execute_cartesian_move(MAGAZINE_INSERT_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Inserting into Feeder MoveL (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
-                return False
+            if not cycle_failed:
+                self.motion_phase = "PLUNGE"
+                self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Insert Plunge (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)"}
+                if not self._exec_step(cycle_id, "MAGAZINE_PLACE_PLUNGE", 6, lambda: (
+                    self._execute_cartesian_move(MAGAZINE_INSERT_LOCATION, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Return {i+1}] Inserting into Feeder MoveL (Collinear @ {MAGAZINE_INSERT_LOCATION[3]}°)")
+                )):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 7: Release Billet
             # -------------------------------------------------------------
-            self.motion_phase = "RELEASE"
-            self.status_msg = f"[Return {i+1}] Releasing into Feeder (DO0=ON)"
-            if not self.set_gripper(False):
-                return False
-            self._dwell(GRIPPER_DWELL_SEC)
-            if self.abort_requested or self.stop_active:
-                break
-            self.held_workpiece = False
-            self.magazine_count = min(8, self.magazine_count + 1)
-            self.mag_sensor = True
+            if not cycle_failed:
+                self.motion_phase = "RELEASE"
+                self.status_msg = f"[Return {i+1}] Releasing into Feeder (DO0=ON)"
+                def do_release():
+                    if not self.set_gripper(False):
+                        return False
+                    self._dwell(GRIPPER_DWELL_SEC)
+                    if self.abort_requested or self.stop_active:
+                        return False
+                    self.held_workpiece = False
+                    self.magazine_count = min(8, self.magazine_count + 1)
+                    self.mag_sensor = True
+                    return True
+                if not self._exec_step(cycle_id, "MAGAZINE_PLACE_RELEASE", 7, do_release):
+                    cycle_failed = True
 
             # -------------------------------------------------------------
             # STEP 8: Feeder Top Insert Extract (MoveL Collinear Retract)
             # -------------------------------------------------------------
-            self.motion_phase = "EXTRACT"
-            self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Extract Retract MoveL @ {MAGAZINE_INSERT_LOCATION[3]}°"}
-            if not self._execute_cartesian_move(mag_insert_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
-                                               step_name=f"[Return {i+1}] Feeder Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]}°)"):
+            if not cycle_failed:
+                self.motion_phase = "EXTRACT"
+                self.motion_angle = {"u": MAGAZINE_INSERT_LOCATION[3], "v": MAGAZINE_INSERT_LOCATION[4], "w": MAGAZINE_INSERT_LOCATION[5], "desc": f"Feeder Extract Retract MoveL @ {MAGAZINE_INSERT_LOCATION[3]} deg"}
+                if not self._exec_step(cycle_id, "MAGAZINE_PLACE_EXTRACT", 8, lambda: (
+                    self._execute_cartesian_move(mag_insert_approach, vel_ratio=ACTION_VEL_RATIO, acc_ratio=ACTION_ACC_RATIO,
+                                                 step_name=f"[Return {i+1}] Feeder Extract Retract MoveL (Clearance {APPROACH_CLEARANCE_Z}mm @ {MAGAZINE_INSERT_LOCATION[3]} deg)")
+                )):
+                    cycle_failed = True
+
+            cycle_dur = round(time.monotonic() - t_cycle_start, 3)
+            c_status = "completed" if not cycle_failed else ("cancelled" if (self.stop_active or self.abort_requested) else "failed")
+            if cycle_id:
+                try:
+                    self.storage.finish_cycle(cycle_id, status=c_status, duration_seconds=cycle_dur)
+                except Exception:
+                    pass
+
+            if cycle_failed or self.abort_requested or self.stop_active:
+                cycle_aborted = True
                 break
 
-        if not self.abort_requested and not self.stop_active:
+        run_dur = round(time.monotonic() - t_run_start, 3)
+        if not cycle_aborted and not self.abort_requested and not self.stop_active:
             self.motion_phase = "IDLE"
             if not self._execute_move_home():
+                try:
+                    self.storage.finish_run(run_id, status="failed", completed_count=start_count - self.pallet_count, duration_seconds=run_dur, error_message=self.status_msg)
+                except Exception:
+                    pass
                 return False
-            self.last_cycle_tact = round(time.time() - self.cycle_start_time, 2)
+            self.last_cycle_tact = run_dur
             self.status_msg = f"Put-Back Finished! Pallet: {self.pallet_count}/8 | Tact: {self.last_cycle_tact}s"
+            try:
+                self.storage.finish_run(run_id, status="completed", completed_count=start_count - self.pallet_count, duration_seconds=run_dur)
+                self.storage.record_state_transition("RUNNING", "IDLE", "completed", run_id=run_id)
+            except Exception:
+                pass
+        else:
+            final_status = "cancelled" if (self.stop_active or self.abort_requested and not self.fault) else "failed"
+            try:
+                self.storage.finish_run(run_id, status=final_status, completed_count=start_count - self.pallet_count, duration_seconds=run_dur, error_message=self.status_msg)
+                self.storage.record_state_transition("RUNNING", self.workcell_state, final_status, run_id=run_id)
+            except Exception:
+                pass
 
         with self.lock:
             self.sequence_running = False

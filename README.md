@@ -1,6 +1,6 @@
 # Neuromeka Indy7 3D Digital Twin & Palletizing Workcell
 
-A real-time WebGL/Three.js 3D Digital Twin and multi-purpose robot control center for the **Neuromeka Indy7** 6-DOF industrial collaborative robot.
+A robotics integration project combining a **Three.js workcell visualization**, **Python/FastAPI backend**, and **operator controls** for the Neuromeka Indy7 collaborative robot. It supports a hardware-free simulation and an optional IndyDCP3 controller connection.
 
 ## Portfolio foundation milestone
 
@@ -12,6 +12,8 @@ The application now starts in **simulation on localhost**, with no robot connect
 - [Remaining portfolio roadmap](docs/roadmap.md)
 
 Run the behavior and HTTP/WebSocket integration tests with `uv run python -m unittest discover -s tests -v`.
+
+**Validation scope:** The linked baseline records a simulation run, not measured robot performance. Hardware command paths are implemented, but the foundation documentation does not claim hardware-in-the-loop validation. See the [demo and verification guide](docs/demo.md) for repeatable checks.
 
 ![Digital Twin Overview](https://img.shields.io/badge/Robotics-Neuromeka%20Indy7-orange)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
@@ -78,7 +80,7 @@ neuromeka-digitaltwin/
 ### 2. Install Dependencies
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/se4nchoi/neuromeka-digitaltwin.git
 cd neuromeka-digitaltwin
 
 # Install dependencies using uv
